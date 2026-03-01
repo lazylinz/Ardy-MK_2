@@ -12,14 +12,14 @@
           "luaScript": "write_variable(\"led_brightness\", 30)",
           "enabled": true,
           "runtimeState": "firing",
-          "lastFiredAt": 1772356888992,
-          "lastStateChangeAt": 1772356888992,
+          "lastFiredAt": 1772358522560,
+          "lastStateChangeAt": 1772358522560,
           "lastRuntimeEvent": "changed variable \"led_brightness\"",
           "createdAt": 1772351472056,
-          "updatedAt": 1772356888992
+          "updatedAt": 1772358522560
         }
       ],
-      "updatedAt": 1772356888992
+      "updatedAt": 1772358522561
     }
   }
 }
