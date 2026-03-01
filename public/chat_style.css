@@ -1124,10 +1124,11 @@ body.show-emoji-picker em-emoji-picker { visibility: visible; }
 
 @media (max-width: 768px) {
   .chat-header {
-    padding: 10px 12px;
+    padding: 8px 10px;
     align-items: flex-start;
     flex-wrap: wrap;
-    gap: 10px;
+    gap: 6px;
+    border-bottom-width: 3px;
   }
 
   .chat-header .header-info {
@@ -1138,21 +1139,27 @@ body.show-emoji-picker em-emoji-picker { visibility: visible; }
   .header-actions {
     width: 100%;
     justify-content: space-between;
-    gap: 8px;
+    gap: 6px;
   }
 
   .model-select-wrap {
     flex: 1;
     min-width: 0;
+    gap: 5px;
+    padding: 3px 6px;
   }
 
   .model-select-wrap select {
     min-width: 0;
     width: 100%;
+    font-size: 0.56rem;
+    padding: 3px 6px;
   }
 
   .header-logout {
     flex-shrink: 0;
+    font-size: 0.58rem;
+    padding: 5px 8px;
   }
 
   .chat-body .message .message-text {
@@ -1212,17 +1219,32 @@ body.show-emoji-picker em-emoji-picker { visibility: visible; }
   }
 
   .header-info .chatbot-logo {
-    width: 36px;
-    height: 36px;
-    padding: 6px;
+    width: 32px;
+    height: 32px;
+    padding: 5px;
   }
 
   .header-info .logo-text {
-    font-size: 0.9rem;
+    font-size: 0.82rem;
   }
 
   .model-select-wrap label {
     display: none;
+  }
+
+  .model-select-wrap {
+    padding: 2px 5px;
+  }
+
+  .model-select-wrap select {
+    min-height: 28px;
+    font-size: 0.55rem;
+    padding: 2px 5px;
+  }
+
+  .header-logout {
+    padding: 4px 7px;
+    font-size: 0.55rem;
   }
 
   .chat-body {
@@ -1267,3 +1289,27 @@ body.show-emoji-picker em-emoji-picker { visibility: visible; }
   }
 }
 
+@media (max-width: 768px) and (max-height: 760px) {
+  .chat-header {
+    padding: 6px 8px;
+    border-bottom-width: 2px;
+  }
+
+  .header-logo-wrap {
+    gap: 8px;
+  }
+
+  .header-info .chatbot-logo {
+    width: 30px;
+    height: 30px;
+    padding: 4px;
+  }
+
+  .header-info .logo-text {
+    font-size: 0.76rem;
+  }
+
+  .chat-footer {
+    padding-top: 6px;
+  }
+}
