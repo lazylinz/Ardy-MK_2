@@ -1,0 +1,52 @@
+{
+  "users": {
+    "4NPcDf6CvUsyPo-Y06x3Gj7HYhdeaLs3": {
+      "variables": {
+        "led_brightness": {
+          "value": 100,
+          "updatedAt": 1772347514900
+        }
+      },
+      "updatedAt": 1772347514901
+    },
+    "1YK7kJml-ryk9AabqxhBUwNyRoPqe3R9": {
+      "variables": {
+        "temp": {
+          "value": 37,
+          "updatedAt": 1772349647000
+        },
+        "led_brightness": {
+          "value": 37,
+          "updatedAt": 1772350403666
+        }
+      },
+      "updatedAt": 1772350403666
+    },
+    "jRTDVp-x3--8N30Ntk-NeaeRShTY3VYT": {
+      "variables": {
+        "led_brightness": {
+          "value": 46,
+          "updatedAt": 1772350949603
+        },
+        "temp": {
+          "value": 46,
+          "updatedAt": 1772350862000
+        }
+      },
+      "updatedAt": 1772350949603
+    },
+    "GAAwY7dY4f0BOIIqj2qD2M-L_pTKRJ3Y": {
+      "variables": {
+        "led_brightness": {
+          "value": 100,
+          "updatedAt": 1772351602091
+        },
+        "temp": {
+          "value": 21,
+          "updatedAt": 1772351510000
+        }
+      },
+      "updatedAt": 1772351602092
+    }
+  }
+}

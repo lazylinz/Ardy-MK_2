@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Control Panel - Ardy Assistant</title>
+    <link rel="stylesheet" href="control_style.css" />
+  </head>
+  <body>
+    <div class="layout">
+      <aside class="sidebar">
+        <a class="nav-btn" href="/chat.html">chat</a>
+        <a class="nav-btn active" href="/control.html">control panel</a>
+        <a class="nav-btn" href="/macros.html">macros</a>
+      </aside>
+
+      <main class="main">
+        <header class="header">
+          <div class="header-info">
+            <div class="header-logo-wrap">
+              <img src="LOGO.svg" alt="Ardy logo" class="chatbot-logo" />
+              <div class="brand-text">
+                <span class="brand-kicker">Arduino AIOT Workspace</span>
+                <h2 class="logo-text">Ardy Assistant</h2>
+              </div>
+            </div>
+            <span class="page-pill">Control Panel</span>
+          </div>
+          <a href="/logout" class="logout">Logout</a>
+        </header>
+
+        <section class="frame-wrap">
+          <iframe id="arduino-cloud-frame" title="Arduino Cloud Control Panel" loading="lazy"></iframe>
+        </section>
+      </main>
+    </div>
+    <script src="control_script.js"></script>
+  </body>
+</html>

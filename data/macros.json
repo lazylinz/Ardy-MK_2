@@ -1,0 +1,25 @@
+{
+  "users": {
+    "GAAwY7dY4f0BOIIqj2qD2M-L_pTKRJ3Y": {
+      "macros": [
+        {
+          "id": "macro-1772351472056-438",
+          "name": "Temperature LED Control",
+          "triggerLua": "read_variable(\"temp\") > 38",
+          "thenLuaScript": "write_variable(\"led_brightness\", 30)",
+          "elseLuaScript": "write_variable(\"led_brightness\", 100)",
+          "condition": "read_variable(\"temp\") > 38",
+          "luaScript": "write_variable(\"led_brightness\", 30)",
+          "enabled": true,
+          "runtimeState": "firing",
+          "lastFiredAt": 1772351602094,
+          "lastStateChangeAt": 1772351602094,
+          "lastRuntimeEvent": "changed variable \"led_brightness\"",
+          "createdAt": 1772351472056,
+          "updatedAt": 1772351602094
+        }
+      ],
+      "updatedAt": 1772351602094
+    }
+  }
+}

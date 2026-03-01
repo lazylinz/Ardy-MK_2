@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Ardy | Login</title>
+    <link rel="stylesheet" href="index_style.css">
+</head>
+<body>
+    <main class="landing-shell">
+        <section class="landing-brand">
+            <div class="brand-chip">Arduino AIOT Assistant</div>
+            <h1>Ardy Chat Workspace</h1>
+            <p>Secure access to your multi-chat AI assistant with tools, files, and session history.</p>
+            <ul class="feature-list">
+                <li>Persistent conversations</li>
+                <li>Web-assisted responses</li>
+                <li>File and image prompts</li>
+            </ul>
+        </section>
+
+        <section class="login-card-wrap">
+            <div class="login-card">
+                <div class="logo-row">
+                    <img src="LOGO.svg" alt="Ardy logo" class="logo-mark">
+                    <div>
+                        <h2>Sign in</h2>
+                        <p>Enter your access password to continue.</p>
+                    </div>
+                </div>
+
+                <form id="loginForm" class="login-form">
+                    <label for="password">Password</label>
+                    <input type="password" id="password" placeholder="Enter password" autocomplete="current-password" required>
+                    <button type="submit" id="loginBtn">Continue to Chat</button>
+                </form>
+
+                <div id="message" role="status" aria-live="polite"></div>
+            </div>
+        </section>
+    </main>
+
+    <script src="index_script.js"></script>
+</body>
+</html>
+    </div>
+
+
+    <script>
+        document.getElementById('loginForm').addEventListener('submit', async e => {
+            e.preventDefault();
+            const msg = document.getElementById('message');
+            msg.textContent = '';
+            const pwd = document.getElementById('password').value;
+            try {
+                const res = await fetch('/login', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                    body: new URLSearchParams({ password: pwd })
+                });
+                if (res.ok) {
+                    msg.style.color = 'green';
+                    msg.textContent = 'Login successful! Redirecting...';
+                    setTimeout(() => { window.location.href = 'chat.html'; }, 1000);
+                } else {
+                    const data = await res.json();
+                    msg.style.color = 'red';
+                    msg.textContent = data.message || 'Login failed';
+                }
+            } catch (err) {
+                msg.style.color = 'red';
+                msg.textContent = 'Error: ' + err.message;
+            }
+        });
+    </script>
+</body>
+</html>

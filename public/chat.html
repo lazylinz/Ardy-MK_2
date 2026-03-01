@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>AI Chatbot</title>
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@48,400,0,0&family=Material+Symbols+Rounded:opsz,wght,FILL,GRAD@48,400,1,0" />
+    <link rel="stylesheet" href="chat_style.css" />
+  </head>
+  <body>
+    <div class="chat-shell">
+      <aside class="chat-sidebar">
+        <div class="sidebar-header">
+          <button type="button" class="new-chat-btn">
+            <span class="material-symbols-rounded">add</span>
+            New chat
+          </button>
+          <a href="/control.html" class="sidebar-page-btn">
+            control panel
+          </a>
+          <a href="/macros.html" class="sidebar-page-btn">
+            macros
+          </a>
+        </div>
+        <div class="chat-list"></div>
+        <div class="sidebar-footer">
+          <button type="button" id="quick-signin-btn" class="quick-signin-btn">
+            <span class="material-symbols-rounded">qr_code_2</span>
+            quick sign in
+          </button>
+        </div>
+      </aside>
+
+      <div class="chat-app">
+        <div class="chat-header">
+          <div class="header-info">
+            <button type="button" class="sidebar-toggle material-symbols-rounded" aria-label="Toggle chat history">menu</button>
+            <div class="header-logo-wrap">
+              <img src="LOGO.svg" alt="Arduino-inspired logo" class="chatbot-logo" height="50"/>
+              <div class="brand-text">
+                <span class="brand-kicker">Arduino AIOT Workspace</span>
+                <h2 class="logo-text">Ardy Assistant</h2>
+              </div>
+            </div>
+          </div>
+          <div class="header-actions">
+            <div class="model-select-wrap">
+              <label for="model-select">Model</label>
+              <select id="model-select" aria-label="Select model"></select>
+            </div>
+            <a href="/logout" class="header-logout">Logout</a>
+          </div>
+        </div>
+
+        <div class="chat-body">
+          <div class="message bot-message">
+            <div class="message-text"> Hey there <br /> How can I help you today? </div>
+          </div>
+        </div>
+        <div class="chat-footer">
+          <form action="#" class="chat-form">
+            <textarea placeholder="Ask anything" class="message-input" required></textarea>
+            <div class="chat-controls">
+               <button type="button" id="tools-btn" class="material-symbols-rounded">travel_explore</button>
+               <div class="tools-menu">
+                  <div class="tools-menu-item" data-tool="web">
+                      <span class="material-symbols-outlined">public</span>
+                      Web Search
+                  </div>
+                  <div class="tools-menu-item" data-tool="macro">
+                      <span class="material-symbols-outlined">code</span>
+                      Create Macro
+                  </div>
+               </div>
+              <button type="button" id="multi-agent-toggle" class="mode-toggle-btn" title="Enable multi-agent debate mode">
+                <span class="material-symbols-rounded">groups</span>
+                Multi Agent
+              </button>
+               
+              <button type="button" id="emoji-picker" class="material-symbols-outlined">sentiment_satisfied</button>
+              <div class="file-upload-wrapper">
+                <input type="file" accept="*/*" id="file-input" hidden />
+                <img src="#" />
+                <div class="file-icon-preview"></div>
+                <button type="button" id="file-upload" class="material-symbols-rounded">attach_file</button>
+                <button type="button" id="file-cancel" class="material-symbols-rounded">close</button>
+              </div>
+              <button type="submit" id="send-message" class="material-symbols-rounded">arrow_upward</button>
+            </div>
+          </form>
+        </div>
+      </div>
+    </div>
+    <div id="quick-signin-modal" class="quick-signin-modal" aria-hidden="true">
+      <div class="quick-signin-dialog">
+        <button type="button" id="quick-signin-close" class="quick-signin-close" aria-label="Close">close</button>
+        <h3>Quick Sign In</h3>
+        <img id="quick-signin-qr-image" alt="Quick sign-in QR code" />
+        <p id="quick-signin-url"></p>
+      </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/emoji-mart@latest/dist/browser.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+    <script src="chat_script.js"></script>
+  </body>
+</html>

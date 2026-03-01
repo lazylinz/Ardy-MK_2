@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Macros - Ardy Assistant</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/theme/material-darker.min.css" />
+    <link rel="stylesheet" href="macros_style.css" />
+  </head>
+  <body>
+    <div class="layout">
+      <aside class="sidebar">
+        <a class="nav-btn" href="/chat.html">chat</a>
+        <a class="nav-btn" href="/control.html">control panel</a>
+        <a class="nav-btn active" href="/macros.html">macros</a>
+      </aside>
+
+      <main class="main">
+        <header class="header">
+          <div class="header-info">
+            <div class="header-logo-wrap">
+              <img src="LOGO.svg" alt="Ardy logo" class="chatbot-logo" />
+              <div class="brand-text">
+                <span class="brand-kicker">Arduino AIOT Workspace</span>
+                <h2 class="logo-text">Ardy Assistant</h2>
+              </div>
+            </div>
+            <span class="page-pill">Macros</span>
+          </div>
+          <a href="/logout" class="logout">Logout</a>
+        </header>
+
+        <section class="content">
+          <form id="macro-form" class="macro-form">
+            <input type="text" id="macro-name" placeholder="Macro name" required />
+            <textarea id="macro-trigger-lua" placeholder="Trigger (Lua expression), e.g. read_variable('temp') > 30" required></textarea>
+            <textarea id="macro-then-script" placeholder="Then script (Lua): runs when trigger is true" required></textarea>
+            <textarea id="macro-else-script" placeholder="Else script (Lua): runs when trigger is false"></textarea>
+            <button type="submit">Save Macro</button>
+          </form>
+
+          <div id="macro-status" class="status"></div>
+          <div id="macro-list" class="macro-list"></div>
+        </section>
+      </main>
+    </div>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/lua/lua.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/addon/edit/closebrackets.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/addon/edit/matchbrackets.min.js"></script>
+    <script src="macros_script.js"></script>
+  </body>
+</html>
