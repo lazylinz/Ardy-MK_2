@@ -58,6 +58,8 @@ const IP_WHITELIST = (process.env.IP_WHITELIST || '').split(',').filter(Boolean)
 const SESSION_SECRET = process.env.SESSION_SECRET || 'keyboard cat';
 const IFLOW_API_KEY = process.env.IFLOW_API_KEY || '';
 const IFLOW_API_URL = 'https://apis.iflow.cn/v1/chat/completions';
+const AUTH_COOKIE_NAME = 'ardy_auth';
+const AUTH_COOKIE_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
 const QUICK_SIGNIN_TTL_MS = 5 * 60 * 1000;
 const quickSigninTokens = new Map();
 const MACRO_FIRING_WINDOW_MS = 5000;
@@ -458,6 +460,114 @@ function getClientIp(req) {
     );
 }
 
+function parseCookies(req) {
+    const header = String(req.headers?.cookie || '');
+    if (!header) return {};
+    return header.split(';').reduce((acc, part) => {
+        const idx = part.indexOf('=');
+        if (idx <= 0) return acc;
+        const key = part.slice(0, idx).trim();
+        const value = part.slice(idx + 1).trim();
+        if (!key) return acc;
+        try {
+            acc[key] = decodeURIComponent(value);
+        } catch (error) {
+            acc[key] = value;
+        }
+        return acc;
+    }, {});
+}
+
+function signAuthPayload(encodedPayload) {
+    return crypto.createHmac('sha256', SESSION_SECRET).update(String(encodedPayload || '')).digest('base64url');
+}
+
+function createAuthToken(sessionId) {
+    const payload = {
+        sid: String(sessionId || ''),
+        iat: Date.now()
+    };
+    const encodedPayload = Buffer.from(JSON.stringify(payload)).toString('base64url');
+    const signature = signAuthPayload(encodedPayload);
+    return `${encodedPayload}.${signature}`;
+}
+
+function verifyAuthToken(token) {
+    const source = String(token || '').trim();
+    if (!source || !source.includes('.')) return null;
+    const [encodedPayload, providedSig] = source.split('.');
+    if (!encodedPayload || !providedSig) return null;
+
+    const expectedSig = signAuthPayload(encodedPayload);
+    const providedBuffer = Buffer.from(providedSig);
+    const expectedBuffer = Buffer.from(expectedSig);
+    if (providedBuffer.length !== expectedBuffer.length) return null;
+    if (!crypto.timingSafeEqual(providedBuffer, expectedBuffer)) return null;
+
+    try {
+        const decoded = Buffer.from(encodedPayload, 'base64url').toString('utf8');
+        const payload = JSON.parse(decoded);
+        const sid = String(payload?.sid || '').trim();
+        if (!sid) return null;
+        return { sid };
+    } catch (error) {
+        return null;
+    }
+}
+
+function getSignedAuth(req) {
+    const cookies = parseCookies(req);
+    const token = cookies[AUTH_COOKIE_NAME];
+    return verifyAuthToken(token);
+}
+
+function setAuthCookie(req, res, sessionId) {
+    const forwardedProto = String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim();
+    const shouldUseSecure = IS_VERCEL || forwardedProto === 'https' || req.secure;
+    res.cookie(AUTH_COOKIE_NAME, createAuthToken(sessionId), {
+        httpOnly: true,
+        sameSite: 'lax',
+        secure: shouldUseSecure,
+        path: '/',
+        maxAge: AUTH_COOKIE_MAX_AGE_MS
+    });
+}
+
+function clearAuthCookie(req, res) {
+    const forwardedProto = String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim();
+    const shouldUseSecure = IS_VERCEL || forwardedProto === 'https' || req.secure;
+    res.clearCookie(AUTH_COOKIE_NAME, {
+        httpOnly: true,
+        sameSite: 'lax',
+        secure: shouldUseSecure,
+        path: '/'
+    });
+}
+
+function getSessionUserKey(req) {
+    const fromAuth = String(req.authSessionId || '').trim();
+    if (fromAuth) return fromAuth;
+    const fromSignedCookie = String(getSignedAuth(req)?.sid || '').trim();
+    if (fromSignedCookie) return fromSignedCookie;
+    const fromExpressSession = String(req.sessionID || '').trim();
+    if (fromExpressSession) return fromExpressSession;
+    return `anon-${crypto.randomBytes(12).toString('hex')}`;
+}
+
+function establishAuthenticatedRequest(req, res) {
+    const sessionId = crypto.randomBytes(16).toString('hex');
+    if (req.session) req.session.authenticated = true;
+    req.authSessionId = sessionId;
+    setAuthCookie(req, res, sessionId);
+    return sessionId;
+}
+
+function destroyAuthenticatedRequest(req, res) {
+    clearAuthCookie(req, res);
+    if (!req.session) return;
+    req.session.destroy(() => undefined);
+}
+
 
 
 // IP whitelist middleware
@@ -475,7 +585,14 @@ function requireWhitelistedIp(req, res, next) {
 
 // authentication check
 function requireAuth(req, res, next) {
+    const signedAuth = getSignedAuth(req);
+    if (signedAuth?.sid) {
+        req.authSessionId = signedAuth.sid;
+        if (req.session) req.session.authenticated = true;
+        return next();
+    }
     if (req.session && req.session.authenticated) {
+        req.authSessionId = String(req.sessionID || '').trim() || crypto.randomBytes(16).toString('hex');
         return next();
     }
     // APIs should return an auth error instead of HTML redirect.
@@ -490,16 +607,15 @@ function requireAuth(req, res, next) {
 app.post('/login', (req, res) => {
     const pwd = req.body.password;
     if (pwd === PASSWORD) {
-        req.session.authenticated = true;
+        establishAuthenticatedRequest(req, res);
         return res.json({ success: true });
     }
     return res.status(401).json({ success: false, message: 'Invalid password' });
 });
 
 app.get('/logout', (req, res) => {
-    req.session.destroy(() => {
-        res.redirect('/');
-    });
+    destroyAuthenticatedRequest(req, res);
+    return res.redirect('/');
 });
 
 app.get('/quick-signin', (req, res) => {
@@ -511,7 +627,7 @@ app.get('/quick-signin', (req, res) => {
     if (!consumed) {
         return res.status(401).send('Invalid or expired quick sign-in token.');
     }
-    req.session.authenticated = true;
+    establishAuthenticatedRequest(req, res);
     return res.redirect('/chat.html');
 });
 
@@ -531,7 +647,7 @@ app.post('/api/data', (req, res) => {
 });
 
 app.post('/api/quick-signin-token', requireWhitelistedIp, requireAuth, (req, res) => {
-    const token = mintQuickSigninToken(req.sessionID);
+    const token = mintQuickSigninToken(getSessionUserKey(req));
     const origin = getRequestOrigin(req);
     const url = `${origin}/quick-signin?t=${encodeURIComponent(token)}`;
     return res.json({
@@ -663,7 +779,7 @@ app.get('/api/server-location', requireWhitelistedIp, requireAuth, (req, res) =>
 
 app.get('/api/macros', requireWhitelistedIp, requireAuth, (req, res) => {
     const store = readMacroStore();
-    const userKey = req.sessionID;
+    const userKey = getSessionUserKey(req);
     const userState = store.users[userKey] || { macros: [] };
     return res.json({
         macros: sanitizeMacros(userState.macros)
@@ -681,7 +797,7 @@ app.post('/api/macros', requireWhitelistedIp, requireAuth, (req, res) => {
     }
 
     const store = readMacroStore();
-    const userKey = req.sessionID;
+    const userKey = getSessionUserKey(req);
     const existing = sanitizeMacros(store.users[userKey]?.macros || []);
     const now = Date.now();
     const macro = {
@@ -713,7 +829,7 @@ app.put('/api/macros/:id', requireWhitelistedIp, requireAuth, (req, res) => {
     if (!macroId) return res.status(400).json({ error: { message: 'macro id is required' } });
 
     const store = readMacroStore();
-    const userKey = req.sessionID;
+    const userKey = getSessionUserKey(req);
     const macros = sanitizeMacros(store.users[userKey]?.macros || []);
     const idx = macros.findIndex((macro) => macro.id === macroId);
     if (idx === -1) return res.status(404).json({ error: { message: 'Macro not found' } });
@@ -757,7 +873,7 @@ app.delete('/api/macros/:id', requireWhitelistedIp, requireAuth, (req, res) => {
     if (!macroId) return res.status(400).json({ error: { message: 'macro id is required' } });
 
     const store = readMacroStore();
-    const userKey = req.sessionID;
+    const userKey = getSessionUserKey(req);
     const macros = sanitizeMacros(store.users[userKey]?.macros || []);
     const filtered = macros.filter((macro) => macro.id !== macroId);
     store.users[userKey] = { macros: filtered, updatedAt: Date.now() };
@@ -1238,7 +1354,7 @@ function sanitizeThreads(rawThreads) {
 
 function getChatsHandler(req, res) {
     const store = readChatStore();
-    const userKey = req.sessionID;
+    const userKey = getSessionUserKey(req);
     const userState = store.users[userKey] || { threads: [], activeThreadId: null };
     return res.json({
         threads: sanitizeThreads(userState.threads),
@@ -1251,7 +1367,7 @@ function putChatsHandler(req, res) {
     const activeThreadId = typeof req.body?.activeThreadId === 'string' ? req.body.activeThreadId : null;
 
     const store = readChatStore();
-    const userKey = req.sessionID;
+    const userKey = getSessionUserKey(req);
     store.users[userKey] = {
         threads,
         activeThreadId,
