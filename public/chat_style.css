@@ -1005,6 +1005,7 @@ html {
 .chat-form .chat-controls #send-message:hover { background: var(--accent); }
 .chat-form .message-input:valid~.chat-controls #send-message { display: inline-flex; }
 
+
 .chat-form .chat-controls .mode-toggle-btn {
   width: auto;
   min-width: 128px;
