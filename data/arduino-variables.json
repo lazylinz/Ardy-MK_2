@@ -38,15 +38,15 @@
     "GAAwY7dY4f0BOIIqj2qD2M-L_pTKRJ3Y": {
       "variables": {
         "led_brightness": {
-          "value": 100,
-          "updatedAt": 1772415081829
+          "value": 30,
+          "updatedAt": 1772423203416
         },
         "temp": {
-          "value": 21,
-          "updatedAt": 1772351510000
+          "value": 67,
+          "updatedAt": 1772418296000
         }
       },
-      "updatedAt": 1772415081829
+      "updatedAt": 1772423203416
     }
   }
 }
