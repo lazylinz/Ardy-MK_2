@@ -9,7 +9,6 @@ const crypto = require('crypto');
 const { Readable } = require('stream');
 const os = require('os');
 const selfsigned = require('selfsigned');
-const { KokoroTTS } = require('kokoro-js');
 const { createArduinoService, registerArduinoRestRoutes } = require('./arduino-rest-handler');
 let JSDOM = null;
 let ResourceLoader = null;
@@ -64,6 +63,7 @@ const IFLOW_API_URL = 'https://apis.iflow.cn/v1/chat/completions';
 const KOKORO_MODEL_ID = process.env.KOKORO_MODEL_ID || 'onnx-community/Kokoro-82M-v1.0-ONNX';
 const KOKORO_VOICE = process.env.KOKORO_VOICE || 'am_fenrir';
 const KOKORO_SPEED = Number(process.env.KOKORO_SPEED || 1);
+const ENABLE_KOKORO_TTS = String(process.env.ENABLE_KOKORO_TTS || '').toLowerCase() === '1' || !IS_VERCEL;
 const AUTH_COOKIE_NAME = 'ardy_auth';
 const AUTH_COOKIE_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
 const QUICK_SIGNIN_TTL_MS = 5 * 60 * 1000;
@@ -75,6 +75,7 @@ const MACRO_TICK_INTERVAL_MS = 1000;
 const macroIdleTimers = new Map();
 let macroRuntimeTickInProgress = false;
 let kokoroTtsPromise = null;
+let KokoroTTSClass = null;
 
 function stripHtmlTags(value) {
     return String(value || '')
@@ -929,16 +930,39 @@ app.post('/api/iflow/chat', requireWhitelistedIp, requireAuth, async (req, res) 
 });
 
 async function getKokoroTts() {
+    if (!ENABLE_KOKORO_TTS) {
+        throw new Error('Kokoro TTS is disabled in this environment.');
+    }
+
     if (!kokoroTtsPromise) {
-        kokoroTtsPromise = KokoroTTS.from_pretrained(KOKORO_MODEL_ID, {
-            dtype: 'q8',
-            device: 'cpu'
-        });
+        kokoroTtsPromise = (async () => {
+            if (!KokoroTTSClass) {
+                const kokoroModuleName = ['kokoro', '-js'].join('');
+                const kokoroModule = await import(kokoroModuleName);
+                if (!kokoroModule?.KokoroTTS) {
+                    throw new Error('kokoro-js is installed but KokoroTTS export was not found.');
+                }
+                KokoroTTSClass = kokoroModule.KokoroTTS;
+            }
+
+            return KokoroTTSClass.from_pretrained(KOKORO_MODEL_ID, {
+                dtype: 'q8',
+                device: 'cpu'
+            });
+        })();
     }
     return kokoroTtsPromise;
 }
 
 app.post('/api/voice/ardy', requireWhitelistedIp, requireAuth, async (req, res) => {
+    if (!ENABLE_KOKORO_TTS) {
+        return res.status(501).json({
+            error: {
+                message: 'Kokoro TTS is disabled in this deployment. Set ENABLE_KOKORO_TTS=1 to enable it.'
+            }
+        });
+    }
+
     const text = String(req.body?.text || '').replace(/\s+/g, ' ').trim();
     if (!text) {
         return res.status(400).json({ error: { message: 'text is required' } });
