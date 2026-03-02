@@ -30,7 +30,6 @@ const ARDUINO_READ_VARIABLE_API_URL = "/api/arduino/read-variable";
 const ARDUINO_WRITE_VARIABLE_API_URL = "/api/arduino/write-variable";
 const OS_TIME_API_URL = "/api/os/time";
 const QUICK_SIGNIN_TOKEN_API_URL = "/api/quick-signin-token";
-const ARDY_TTS_API_URL = "/api/voice/ardy";
 const CHAT_QUERY_PARAM = "chat";
 const MODEL_STORAGE_KEY = "ardy_selected_text_model_v1";
 const MULTI_AGENT_MODE_STORAGE_KEY = "ardy_multi_agent_mode_v1";
@@ -65,8 +64,6 @@ let isListeningToVoice = false;
 let manualVoiceStop = false;
 let finalVoiceTranscript = "";
 let preferredArdyVoice = null;
-let activeArdyAudio = null;
-let ttsAbortController = null;
 let pendingVoiceReplyFromStt = false;
 const initialInputHeight = messageInput.scrollHeight;
 
@@ -136,7 +133,8 @@ const scoreVoiceForArdy = (voice) => {
     const lang = String(voice?.lang || "").toLowerCase();
     let score = 0;
     if (lang.startsWith("en")) score += 6;
-    if (lang === "en-us") score += 3;
+    if (lang === "en-gb") score += 10;
+    if (name.includes("google uk english male")) score += 100;
     if (MALE_VOICE_HINTS.some((hint) => name.includes(hint))) score += 8;
     if (FEMALE_VOICE_HINTS.some((hint) => name.includes(hint))) score -= 6;
     if (voice?.localService) score += 2;
@@ -147,6 +145,9 @@ const pickPreferredArdyVoice = () => {
     if (!("speechSynthesis" in window)) return null;
     const voices = window.speechSynthesis.getVoices();
     if (!voices?.length) return null;
+
+    const exactGoogleUkMale = voices.find((voice) => String(voice?.name || "").toLowerCase() === "google uk english male");
+    if (exactGoogleUkMale) return exactGoogleUkMale;
 
     let bestVoice = null;
     let bestScore = -Infinity;
@@ -169,46 +170,10 @@ const stripMarkdownForSpeech = (text) => {
 };
 
 const stopArdySpeech = () => {
-    if (ttsAbortController) {
-        ttsAbortController.abort();
-        ttsAbortController = null;
-    }
-    if (activeArdyAudio) {
-        activeArdyAudio.pause();
-        activeArdyAudio.src = "";
-        activeArdyAudio = null;
-    }
     if ("speechSynthesis" in window) {
         window.speechSynthesis.cancel();
     }
 };
-
-const waitForAudioReady = (audio) => new Promise((resolve, reject) => {
-    if (!audio) {
-        reject(new Error("Audio is not available"));
-        return;
-    }
-    if (Number.isFinite(audio.duration) && audio.duration > 0) {
-        resolve();
-        return;
-    }
-    const onReady = () => {
-        cleanup();
-        resolve();
-    };
-    const onError = () => {
-        cleanup();
-        reject(new Error("Audio metadata failed to load"));
-    };
-    const cleanup = () => {
-        audio.removeEventListener("loadedmetadata", onReady);
-        audio.removeEventListener("canplaythrough", onReady);
-        audio.removeEventListener("error", onError);
-    };
-    audio.addEventListener("loadedmetadata", onReady, { once: true });
-    audio.addEventListener("canplaythrough", onReady, { once: true });
-    audio.addEventListener("error", onError, { once: true });
-});
 
 const speakAsArdyFallback = (plainText) => {
     if (!plainText || !("speechSynthesis" in window) || typeof SpeechSynthesisUtterance === "undefined") return;
@@ -216,9 +181,9 @@ const speakAsArdyFallback = (plainText) => {
     const utterance = new SpeechSynthesisUtterance(plainText);
     if (preferredArdyVoice) {
         utterance.voice = preferredArdyVoice;
-        utterance.lang = preferredArdyVoice.lang || "en-US";
+        utterance.lang = preferredArdyVoice.lang || "en-GB";
     } else {
-        utterance.lang = "en-US";
+        utterance.lang = "en-GB";
     }
     utterance.rate = 0.96;
     utterance.pitch = 0.86;
@@ -227,86 +192,14 @@ const speakAsArdyFallback = (plainText) => {
     window.speechSynthesis.speak(utterance);
 };
 
-const requestArdyTtsAudio = async (plainText) => {
-    stopArdySpeech();
-    const abortController = new AbortController();
-    ttsAbortController = abortController;
-    try {
-        const response = await fetch(ARDY_TTS_API_URL, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-                text: plainText,
-                languageCode: String(navigator.language || "en-US").split("-")[0]
-            }),
-            signal: abortController.signal
-        });
-        if (response.status === 204) {
-            throw new Error("Local TTS is unavailable in this runtime");
-        }
-        if (!response.ok) {
-            throw new Error(`TTS request failed (${response.status})`);
-        }
-        const audioBlob = await response.blob();
-        if (!audioBlob.size) throw new Error("Empty TTS audio");
-
-        const audioUrl = URL.createObjectURL(audioBlob);
-        const audio = new Audio(audioUrl);
-        activeArdyAudio = audio;
-        await waitForAudioReady(audio);
-        return { audio, audioUrl };
-    } finally {
-        if (ttsAbortController === abortController) {
-            ttsAbortController = null;
-        }
-    }
-};
-
-const streamMessageWhileAudioPlays = async (messageElement, markdownText, audio) => {
-    messageElement.innerHTML = "";
-    let rafId = null;
-    let lastChars = 0;
-    const textLength = markdownText.length;
-    const draw = () => {
-        if (!audio || !Number.isFinite(audio.duration) || audio.duration <= 0) return;
-        const ratio = Math.max(0, Math.min(1, audio.currentTime / audio.duration));
-        const charCount = Math.max(1, Math.floor(textLength * ratio));
-        if (charCount !== lastChars) {
-            lastChars = charCount;
-            messageElement.innerHTML = marked.parse(markdownText.slice(0, charCount));
-            chatBody.scrollTo({ top: chatBody.scrollHeight, behavior: "smooth" });
-        }
-        rafId = requestAnimationFrame(draw);
-    };
-
-    await audio.play();
-    rafId = requestAnimationFrame(draw);
-    await new Promise((resolve) => {
-        audio.onended = () => resolve();
-        audio.onerror = () => resolve();
-    });
-    if (rafId) cancelAnimationFrame(rafId);
-    messageElement.innerHTML = marked.parse(markdownText);
-    chatBody.scrollTo({ top: chatBody.scrollHeight, behavior: "smooth" });
-};
-
 const renderVoiceReplyAfterThinking = async (incomingMessageDiv, messageElement, markdownText) => {
     const plainText = stripMarkdownForSpeech(markdownText).slice(0, 1400);
-    if (!plainText) {
-        messageElement.innerHTML = marked.parse(markdownText);
-        return;
-    }
-
-    try {
-        const { audio, audioUrl } = await requestArdyTtsAudio(plainText);
-        messageElement.innerHTML = "";
-        await streamMessageWhileAudioPlays(messageElement, markdownText, audio);
-        URL.revokeObjectURL(audioUrl);
-        if (activeArdyAudio === audio) activeArdyAudio = null;
-    } catch (error) {
-        messageElement.innerHTML = marked.parse(markdownText);
-        if (error?.name !== "AbortError") {
+    messageElement.innerHTML = marked.parse(markdownText);
+    if (plainText) {
+        try {
             speakAsArdyFallback(plainText);
+        } catch (error) {
+            // Ignore speech engine failures and keep rendered text reply.
         }
     }
 };
