@@ -1042,6 +1042,15 @@ html {
 .chat-form .chat-controls #send-message:hover { background: var(--accent); }
 .chat-form .message-input:valid~.chat-controls #send-message { display: inline-flex; }
 
+.chat-form .chat-controls #voice-input.listening {
+  color: #fff;
+  background: var(--accent);
+}
+
+.chat-form .chat-controls #voice-input:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
 
 .chat-form .chat-controls .mode-toggle-btn {
   width: auto;

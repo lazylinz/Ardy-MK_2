@@ -11,6 +11,7 @@ const newChatBtn = document.querySelector(".new-chat-btn");
 const sidebarToggle = document.querySelector(".sidebar-toggle");
 const modelSelect = document.querySelector("#model-select");
 const multiAgentToggle = document.querySelector("#multi-agent-toggle");
+const voiceInputButton = document.querySelector("#voice-input");
 const quickSigninBtn = document.querySelector("#quick-signin-btn");
 const quickSigninModal = document.querySelector("#quick-signin-modal");
 const quickSigninClose = document.querySelector("#quick-signin-close");
@@ -58,6 +59,11 @@ let contextMenuThreadId = null;
 let chatContextMenu = null;
 let selectedTextModel = DEFAULT_MODEL;
 let multiAgentMode = false;
+let speechRecognition = null;
+let isListeningToVoice = false;
+let manualVoiceStop = false;
+let finalVoiceTranscript = "";
+let preferredArdyVoice = null;
 const initialInputHeight = messageInput.scrollHeight;
 
 marked.setOptions({
@@ -111,6 +117,179 @@ const getThreadPreview = (thread) => {
 };
 
 const getModelById = (modelId) => MODEL_OPTIONS.find((m) => m.id === modelId);
+
+const MALE_VOICE_HINTS = [
+    "male", "man", "david", "mark", "daniel", "james", "john", "michael", "thomas",
+    "matthew", "ryan", "aaron", "alex", "sam", "guy", "fred", "arthur"
+];
+const FEMALE_VOICE_HINTS = [
+    "female", "woman", "zira", "susan", "samantha", "victoria", "allison", "jenny",
+    "karen", "aria", "sonia"
+];
+
+const scoreVoiceForArdy = (voice) => {
+    const name = String(voice?.name || "").toLowerCase();
+    const lang = String(voice?.lang || "").toLowerCase();
+    let score = 0;
+    if (lang.startsWith("en")) score += 6;
+    if (lang === "en-us") score += 3;
+    if (MALE_VOICE_HINTS.some((hint) => name.includes(hint))) score += 8;
+    if (FEMALE_VOICE_HINTS.some((hint) => name.includes(hint))) score -= 6;
+    if (voice?.localService) score += 2;
+    return score;
+};
+
+const pickPreferredArdyVoice = () => {
+    if (!("speechSynthesis" in window)) return null;
+    const voices = window.speechSynthesis.getVoices();
+    if (!voices?.length) return null;
+
+    let bestVoice = null;
+    let bestScore = -Infinity;
+    voices.forEach((voice) => {
+        const score = scoreVoiceForArdy(voice);
+        if (score > bestScore) {
+            bestScore = score;
+            bestVoice = voice;
+        }
+    });
+    return bestVoice;
+};
+
+const stripMarkdownForSpeech = (text) => {
+    if (!text) return "";
+    const html = marked.parse(text);
+    const container = document.createElement("div");
+    container.innerHTML = html;
+    return container.textContent.replace(/\s+/g, " ").trim();
+};
+
+const speakAsArdy = (text) => {
+    if (!text || !("speechSynthesis" in window) || typeof SpeechSynthesisUtterance === "undefined") return;
+    const plainText = stripMarkdownForSpeech(text).slice(0, 1400);
+    if (!plainText) return;
+
+    preferredArdyVoice = preferredArdyVoice || pickPreferredArdyVoice();
+    const utterance = new SpeechSynthesisUtterance(plainText);
+    if (preferredArdyVoice) {
+        utterance.voice = preferredArdyVoice;
+        utterance.lang = preferredArdyVoice.lang || "en-US";
+    } else {
+        utterance.lang = navigator.language || "en-US";
+    }
+    utterance.rate = 1;
+    utterance.pitch = 0.88;
+    utterance.volume = 1;
+    window.speechSynthesis.cancel();
+    window.speechSynthesis.speak(utterance);
+};
+
+const submitMessageFromInput = () => {
+    const text = (messageInput.value || "").trim();
+    if (!text) return;
+    handleOutgoingMessage({ preventDefault: () => {} });
+};
+
+const setVoiceInputUi = ({ listening, disabled, title, icon }) => {
+    if (!voiceInputButton) return;
+    voiceInputButton.disabled = Boolean(disabled);
+    voiceInputButton.classList.toggle("listening", Boolean(listening));
+    if (title) voiceInputButton.title = title;
+    if (icon) voiceInputButton.textContent = icon;
+};
+
+const initializeVoiceInput = () => {
+    if (!voiceInputButton) return;
+
+    const SpeechRecognitionCtor = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SpeechRecognitionCtor) {
+        setVoiceInputUi({
+            listening: false,
+            disabled: true,
+            title: "Voice input is not supported on this browser",
+            icon: "mic_off"
+        });
+        return;
+    }
+
+    speechRecognition = new SpeechRecognitionCtor();
+    speechRecognition.lang = navigator.language || "en-US";
+    speechRecognition.continuous = false;
+    speechRecognition.interimResults = true;
+    speechRecognition.maxAlternatives = 1;
+
+    speechRecognition.onstart = () => {
+        isListeningToVoice = true;
+        finalVoiceTranscript = "";
+        setVoiceInputUi({
+            listening: true,
+            disabled: false,
+            title: "Stop voice input",
+            icon: "radio_button_checked"
+        });
+    };
+
+    speechRecognition.onresult = (event) => {
+        let interim = "";
+        for (let i = event.resultIndex; i < event.results.length; i += 1) {
+            const result = event.results[i];
+            const transcript = result?.[0]?.transcript || "";
+            if (result.isFinal) {
+                finalVoiceTranscript += `${transcript} `;
+            } else {
+                interim += transcript;
+            }
+        }
+        const composed = `${finalVoiceTranscript} ${interim}`.replace(/\s+/g, " ").trim();
+        if (composed) {
+            messageInput.value = composed;
+            messageInput.dispatchEvent(new Event("input"));
+        }
+    };
+
+    speechRecognition.onerror = () => {
+        isListeningToVoice = false;
+        setVoiceInputUi({
+            listening: false,
+            disabled: false,
+            title: "Voice input",
+            icon: "mic"
+        });
+    };
+
+    speechRecognition.onend = () => {
+        const transcript = finalVoiceTranscript.replace(/\s+/g, " ").trim();
+        const shouldAutoSend = !manualVoiceStop && Boolean(transcript);
+        manualVoiceStop = false;
+        isListeningToVoice = false;
+        finalVoiceTranscript = "";
+        setVoiceInputUi({
+            listening: false,
+            disabled: false,
+            title: "Voice input",
+            icon: "mic"
+        });
+
+        if (shouldAutoSend) {
+            messageInput.value = transcript;
+            messageInput.dispatchEvent(new Event("input"));
+            submitMessageFromInput();
+        }
+    };
+
+    voiceInputButton.addEventListener("click", () => {
+        if (!speechRecognition) return;
+        if (isListeningToVoice) {
+            manualVoiceStop = true;
+            speechRecognition.stop();
+            return;
+        }
+        try {
+            speechRecognition.lang = navigator.language || "en-US";
+            speechRecognition.start();
+        } catch (error) {}
+    });
+};
 
 const extractTextFromMessageContent = (content) => {
     if (typeof content === "string") return content;
@@ -1787,6 +1966,7 @@ Then output markdown sections: Team Notes, Final Answer.`
                 chatHistory[historyIndex].currentBranch = 0;
             }
             persistCurrentThread();
+            speakAsArdy(synthesisText);
             return;
         }
 
@@ -1995,6 +2175,7 @@ Then output markdown sections: Team Notes, Final Answer.`
                 chatHistory[historyIndex].currentBranch = 0;
             }
             persistCurrentThread();
+            speakAsArdy(fullText);
         }
     } catch (error) {
         renderApiError(messageElement, error.message);
@@ -2378,6 +2559,14 @@ document.addEventListener("keydown", (e) => {
     }
 });
 
+if ("speechSynthesis" in window) {
+    preferredArdyVoice = pickPreferredArdyVoice();
+    window.speechSynthesis.onvoiceschanged = () => {
+        preferredArdyVoice = pickPreferredArdyVoice();
+    };
+}
+
+initializeVoiceInput();
 initializeModelSelector();
 initializeMultiAgentToggle();
 loadViewerIdentity();
