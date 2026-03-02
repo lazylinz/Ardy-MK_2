@@ -241,6 +241,9 @@ const requestArdyTtsAudio = async (plainText) => {
             }),
             signal: abortController.signal
         });
+        if (response.status === 204) {
+            throw new Error("Local TTS is unavailable in this runtime");
+        }
         if (!response.ok) {
             throw new Error(`TTS request failed (${response.status})`);
         }

@@ -7,9 +7,9 @@ const session = require('express-session');
 const https = require('https');
 const crypto = require('crypto');
 const { Readable } = require('stream');
-const { spawn } = require('child_process');
 const os = require('os');
 const selfsigned = require('selfsigned');
+const { KokoroTTS } = require('kokoro-js');
 const { createArduinoService, registerArduinoRestRoutes } = require('./arduino-rest-handler');
 let JSDOM = null;
 let ResourceLoader = null;
@@ -61,9 +61,8 @@ const IP_WHITELIST = (process.env.IP_WHITELIST || '').split(',').filter(Boolean)
 const SESSION_SECRET = process.env.SESSION_SECRET || 'keyboard cat';
 const IFLOW_API_KEY = process.env.IFLOW_API_KEY || '';
 const IFLOW_API_URL = 'https://apis.iflow.cn/v1/chat/completions';
-const KOKORO_COMMAND = process.env.KOKORO_COMMAND || 'python';
-const KOKORO_VOICE = process.env.KOKORO_VOICE || 'am_adam';
-const KOKORO_LANG = process.env.KOKORO_LANG || 'en-us';
+const KOKORO_MODEL_ID = process.env.KOKORO_MODEL_ID || 'onnx-community/Kokoro-82M-v1.0-ONNX';
+const KOKORO_VOICE = process.env.KOKORO_VOICE || 'am_fenrir';
 const KOKORO_SPEED = Number(process.env.KOKORO_SPEED || 1);
 const AUTH_COOKIE_NAME = 'ardy_auth';
 const AUTH_COOKIE_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
@@ -75,6 +74,7 @@ const MACRO_FIRING_WINDOW_MS = 5000;
 const MACRO_TICK_INTERVAL_MS = 1000;
 const macroIdleTimers = new Map();
 let macroRuntimeTickInProgress = false;
+let kokoroTtsPromise = null;
 
 function stripHtmlTags(value) {
     return String(value || '')
@@ -928,59 +928,14 @@ app.post('/api/iflow/chat', requireWhitelistedIp, requireAuth, async (req, res) 
     }
 });
 
-function runProcess(command, args, options = {}) {
-    return new Promise((resolve, reject) => {
-        const proc = spawn(command, args, { windowsHide: true, ...options });
-        let stdout = '';
-        let stderr = '';
-        if (proc.stdout) {
-            proc.stdout.on('data', (chunk) => {
-                stdout += String(chunk || '');
-            });
-        }
-        if (proc.stderr) {
-            proc.stderr.on('data', (chunk) => {
-                stderr += String(chunk || '');
-            });
-        }
-        proc.on('error', reject);
-        proc.on('close', (code) => {
-            if (code !== 0) {
-                reject(new Error(stderr.trim() || stdout.trim() || `process exited with code ${code}`));
-                return;
-            }
-            resolve({ stdout, stderr });
+async function getKokoroTts() {
+    if (!kokoroTtsPromise) {
+        kokoroTtsPromise = KokoroTTS.from_pretrained(KOKORO_MODEL_ID, {
+            dtype: 'q8',
+            device: 'cpu'
         });
-        if (options.stdinText != null && proc.stdin) {
-            proc.stdin.write(String(options.stdinText));
-            proc.stdin.end();
-        }
-    });
-}
-
-const KOKORO_MODEL_URL = 'https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.int8.onnx';
-const KOKORO_VOICES_URL = 'https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin';
-
-async function downloadFile(url, targetPath) {
-    const response = await fetch(url);
-    if (!response.ok) {
-        throw new Error(`Failed to download ${url} (${response.status} ${response.statusText})`);
     }
-    const bytes = Buffer.from(await response.arrayBuffer());
-    fs.writeFileSync(targetPath, bytes);
-}
-
-async function ensureKokoroAssets(kokoroDir) {
-    fs.mkdirSync(kokoroDir, { recursive: true });
-    const modelPath = path.join(kokoroDir, 'kokoro-v1.0.int8.onnx');
-    const voicesPath = path.join(kokoroDir, 'voices-v1.0.bin');
-    if (!fs.existsSync(modelPath)) {
-        await downloadFile(KOKORO_MODEL_URL, modelPath);
-    }
-    if (!fs.existsSync(voicesPath)) {
-        await downloadFile(KOKORO_VOICES_URL, voicesPath);
-    }
-    return { modelPath, voicesPath };
+    return kokoroTtsPromise;
 }
 
 app.post('/api/voice/ardy', requireWhitelistedIp, requireAuth, async (req, res) => {
@@ -990,25 +945,14 @@ app.post('/api/voice/ardy', requireWhitelistedIp, requireAuth, async (req, res) 
     }
 
     const voice = String(req.body?.voice || KOKORO_VOICE || '').trim() || KOKORO_VOICE;
-    const lang = String(req.body?.lang || req.body?.languageCode || KOKORO_LANG || '').trim() || KOKORO_LANG;
     const speedRaw = Number(req.body?.speed ?? KOKORO_SPEED);
     const speed = Number.isFinite(speedRaw) && speedRaw > 0 ? speedRaw : 1;
-    const kokoroDir = path.join(dataDir, 'kokoro');
     const tempOut = path.join(os.tmpdir(), `ardy-kokoro-${Date.now()}-${crypto.randomUUID()}.wav`);
-    const scriptPath = path.join(__dirname, 'kokoro_tts.py');
 
     try {
-        const { modelPath, voicesPath } = await ensureKokoroAssets(kokoroDir);
-        const args = [
-            scriptPath,
-            '--model', modelPath,
-            '--voices', voicesPath,
-            '--voice', voice,
-            '--lang', lang,
-            '--speed', String(speed),
-            '--output', tempOut
-        ];
-        await runProcess(KOKORO_COMMAND, args, { stdinText: text.slice(0, 1800) });
+        const tts = await getKokoroTts();
+        const audio = await tts.generate(text.slice(0, 1800), { voice, speed });
+        await audio.save(tempOut);
         const wavBuffer = fs.readFileSync(tempOut);
         res.status(200);
         res.setHeader('Content-Type', 'audio/wav');
@@ -1017,9 +961,10 @@ app.post('/api/voice/ardy', requireWhitelistedIp, requireAuth, async (req, res) 
         return res.send(wavBuffer);
     } catch (error) {
         const msg = String(error?.message || 'Unknown Kokoro error');
-        const installHint = msg.includes('No module named kokoro_onnx') || msg.includes('not recognized')
-            ? 'Local Kokoro is not installed. Run: python -m pip install kokoro-onnx'
-            : `Local Kokoro TTS failed: ${msg}`;
+        if (/voice|not found|unknown voice/i.test(msg)) {
+            return res.status(400).json({ error: { message: `Invalid Kokoro voice "${voice}".` } });
+        }
+        const installHint = `Local Kokoro TTS failed: ${msg}`;
         return res.status(500).json({ error: { message: installHint } });
     } finally {
         try {
