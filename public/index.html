@@ -25,14 +25,34 @@
                     <img src="LOGO.svg" alt="Ardy logo" class="logo-mark">
                     <div>
                         <h2>Sign in</h2>
-                        <p>Enter your access password to continue.</p>
+                        <p id="stageSubtitle">Enter your access password to continue.</p>
                     </div>
                 </div>
 
                 <form id="loginForm" class="login-form">
                     <label for="password">Password</label>
                     <input type="password" id="password" placeholder="Enter password" autocomplete="current-password" required>
-                    <button type="submit" id="loginBtn">Continue to Chat</button>
+                    <button type="submit" id="loginBtn">Continue</button>
+                </form>
+                <button type="button" id="faceSignInBtn" class="ghost-btn">Sign in with Face Scan</button>
+
+                <section id="faceSection" class="face-section hidden" aria-live="polite">
+                    <div class="scan-shell">
+                        <video id="faceVideo" autoplay muted playsinline></video>
+                        <div class="scan-ring">
+                            <div class="scan-line"></div>
+                        </div>
+                    </div>
+                    <div class="face-actions">
+                        <button type="button" id="scanFaceBtn">Scan Face</button>
+                        <button type="button" id="backBtn" class="ghost-btn">Back</button>
+                    </div>
+                </section>
+
+                <form id="nicknameForm" class="login-form hidden">
+                    <label for="nickname">Choose your nickname</label>
+                    <input type="text" id="nickname" placeholder="e.g. SparkPilot" minlength="2" maxlength="32" required>
+                    <button type="submit" id="enrollBtn">Create Profile</button>
                 </form>
 
                 <div id="message" role="status" aria-live="polite"></div>
@@ -40,6 +60,7 @@
         </section>
     </main>
 
-    <script src="index_script.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/@vladmandic/face-api/dist/face-api.min.js"></script>
+    <script defer src="index_script.js"></script>
 </body>
 </html>

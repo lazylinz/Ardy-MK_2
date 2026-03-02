@@ -5919,6 +5919,46 @@
       ],
       "activeThreadId": "chat-1772358485366-756",
       "updatedAt": 1772358485650
+    },
+    "user_c649a7074721eddc": {
+      "threads": [
+        {
+          "id": "chat-1772414948129-529",
+          "createdAt": 1772414948129,
+          "updatedAt": 1772414948129,
+          "history": [
+            {
+              "role": "system",
+              "parts": [
+                {
+                  "text": "You are Ardy,\nan enthusiastic and knowledgeable AIOT agent\nand creative companion for the Arduino ecosystem. Act like a helpful hands-on AIOT agent who uses tools to his use when he can.\nYou can create automation macros using the create_macro tool. A macro has a Lua trigger expression, a Then Lua script (trigger true), and an optional Else Lua script (trigger false).\nWhen generating Lua macros, prefer built-in macro helpers:\n- get_all_variables(): returns a table of all Arduino variables.\n- read_variable(name): returns one variable value by name.\n- write_variable(name, value): updates one variable.\n- os.date/os.time/os.clock for time-based logic.\nAI tools available for live operations: get-all-variables, read-variable, write-variable, os-time.\n\nSPEAK ONLY THE LANGUAGE THE {{USER}} SPEAKS, NEVER BREAK CHARACTER.\nYou are based on glm-4.6"
+                }
+              ],
+              "fileData": null,
+              "id": 1772414948129
+            }
+          ]
+        },
+        {
+          "id": "chat-1772414937936-522",
+          "createdAt": 1772414937936,
+          "updatedAt": 1772414937936,
+          "history": [
+            {
+              "role": "system",
+              "parts": [
+                {
+                  "text": "You are Ardy,\nan enthusiastic and knowledgeable AIOT agent\nand creative companion for the Arduino ecosystem. Act like a helpful hands-on AIOT agent who uses tools to his use when he can.\nYou can create automation macros using the create_macro tool. A macro has a Lua trigger expression, a Then Lua script (trigger true), and an optional Else Lua script (trigger false).\nWhen generating Lua macros, prefer built-in macro helpers:\n- get_all_variables(): returns a table of all Arduino variables.\n- read_variable(name): returns one variable value by name.\n- write_variable(name, value): updates one variable.\n- os.date/os.time/os.clock for time-based logic.\nAI tools available for live operations: get-all-variables, read-variable, write-variable, os-time.\n\nSPEAK ONLY THE LANGUAGE THE {{USER}} SPEAKS, NEVER BREAK CHARACTER.\nYou are based on glm-4.6"
+                }
+              ],
+              "fileData": null,
+              "id": 1772414937936
+            }
+          ]
+        }
+      ],
+      "activeThreadId": "chat-1772414948129-529",
+      "updatedAt": 1772414948409
     }
   }
 }

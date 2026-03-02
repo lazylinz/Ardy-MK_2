@@ -51,6 +51,7 @@ let sslOptions; // defined later after certs exist
 const dataDir = IS_VERCEL ? '/tmp/ardy-data' : path.join(__dirname, '../data');
 const chatStoreFile = path.join(dataDir, 'chats.json');
 const macroStoreFile = path.join(dataDir, 'macros.json');
+const faceProfileStoreFile = path.join(dataDir, 'face-profiles.json');
 
 // application secrets -------------------------------------------------------
 const PASSWORD = process.env.PASSWORD || 'changeme';
@@ -61,6 +62,8 @@ const IFLOW_API_URL = 'https://apis.iflow.cn/v1/chat/completions';
 const AUTH_COOKIE_NAME = 'ardy_auth';
 const AUTH_COOKIE_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
 const QUICK_SIGNIN_TTL_MS = 5 * 60 * 1000;
+const PASSWORD_GATE_TTL_MS = 10 * 60 * 1000;
+const FACE_MATCH_THRESHOLD = Number(process.env.FACE_MATCH_THRESHOLD || 0.47);
 const quickSigninTokens = new Map();
 const MACRO_FIRING_WINDOW_MS = 5000;
 const MACRO_TICK_INTERVAL_MS = 1000;
@@ -549,14 +552,21 @@ function getSessionUserKey(req) {
     if (fromAuth) return fromAuth;
     const fromSignedCookie = String(getSignedAuth(req)?.sid || '').trim();
     if (fromSignedCookie) return fromSignedCookie;
+    const fromStoredSession = String(req.session?.userKey || '').trim();
+    if (fromStoredSession) return fromStoredSession;
     const fromExpressSession = String(req.sessionID || '').trim();
     if (fromExpressSession) return fromExpressSession;
     return `anon-${crypto.randomBytes(12).toString('hex')}`;
 }
 
-function establishAuthenticatedRequest(req, res) {
-    const sessionId = crypto.randomBytes(16).toString('hex');
-    if (req.session) req.session.authenticated = true;
+function establishAuthenticatedRequest(req, res, preferredSessionId = '') {
+    const candidate = String(preferredSessionId || req.session?.userKey || '').trim();
+    const sessionId = candidate || crypto.randomBytes(16).toString('hex');
+    if (req.session) {
+        req.session.authenticated = true;
+        req.session.userKey = sessionId;
+        req.session.passwordVerifiedAt = null;
+    }
     req.authSessionId = sessionId;
     setAuthCookie(req, res, sessionId);
     return sessionId;
@@ -588,11 +598,14 @@ function requireAuth(req, res, next) {
     const signedAuth = getSignedAuth(req);
     if (signedAuth?.sid) {
         req.authSessionId = signedAuth.sid;
-        if (req.session) req.session.authenticated = true;
+        if (req.session) {
+            req.session.authenticated = true;
+            req.session.userKey = signedAuth.sid;
+        }
         return next();
     }
     if (req.session && req.session.authenticated) {
-        req.authSessionId = String(req.sessionID || '').trim() || crypto.randomBytes(16).toString('hex');
+        req.authSessionId = String(req.session.userKey || req.sessionID || '').trim() || crypto.randomBytes(16).toString('hex');
         return next();
     }
     // APIs should return an auth error instead of HTML redirect.
@@ -603,14 +616,210 @@ function requireAuth(req, res, next) {
     return res.redirect('/');
 }
 
-// --- authentication routes ---
-app.post('/login', (req, res) => {
-    const pwd = req.body.password;
-    if (pwd === PASSWORD) {
-        establishAuthenticatedRequest(req, res);
-        return res.json({ success: true });
+function sanitizeFaceDescriptor(rawDescriptor) {
+    if (!Array.isArray(rawDescriptor)) return null;
+    const normalized = rawDescriptor
+        .map((value) => Number(value))
+        .filter((value) => Number.isFinite(value))
+        .map((value) => Math.max(-10, Math.min(10, value)));
+    if (normalized.length < 32) return null;
+    return normalized.slice(0, 256);
+}
+
+function sanitizeNickname(rawNickname) {
+    const cleaned = String(rawNickname || '')
+        .replace(/\s+/g, ' ')
+        .trim();
+    if (!cleaned) return '';
+    return cleaned.slice(0, 32);
+}
+
+function faceDistance(descriptorA, descriptorB) {
+    if (!Array.isArray(descriptorA) || !Array.isArray(descriptorB)) return Number.POSITIVE_INFINITY;
+    const dims = Math.min(descriptorA.length, descriptorB.length);
+    if (dims < 32) return Number.POSITIVE_INFINITY;
+    let sum = 0;
+    for (let i = 0; i < dims; i += 1) {
+        const delta = Number(descriptorA[i]) - Number(descriptorB[i]);
+        sum += delta * delta;
     }
-    return res.status(401).json({ success: false, message: 'Invalid password' });
+    return Math.sqrt(sum);
+}
+
+function ensureFaceProfileStoreFile() {
+    if (!fs.existsSync(dataDir)) {
+        fs.mkdirSync(dataDir);
+    }
+    if (!fs.existsSync(faceProfileStoreFile)) {
+        fs.writeFileSync(faceProfileStoreFile, JSON.stringify({ users: [] }, null, 2));
+    }
+}
+
+function readFaceProfileStore() {
+    ensureFaceProfileStoreFile();
+    try {
+        const parsed = JSON.parse(fs.readFileSync(faceProfileStoreFile, 'utf8'));
+        if (!parsed || typeof parsed !== 'object') return { users: [] };
+        if (!Array.isArray(parsed.users)) parsed.users = [];
+        return {
+            users: parsed.users
+                .map((entry) => {
+                    const id = String(entry?.id || '').trim();
+                    const nickname = sanitizeNickname(entry?.nickname);
+                    const descriptor = sanitizeFaceDescriptor(entry?.faceDescriptor);
+                    if (!id || !nickname || !descriptor) return null;
+                    return {
+                        id,
+                        nickname,
+                        faceDescriptor: descriptor,
+                        createdAt: Number.isFinite(Number(entry?.createdAt)) ? Number(entry.createdAt) : Date.now(),
+                        updatedAt: Number.isFinite(Number(entry?.updatedAt)) ? Number(entry.updatedAt) : Date.now(),
+                        lastSeenAt: Number.isFinite(Number(entry?.lastSeenAt)) ? Number(entry.lastSeenAt) : null
+                    };
+                })
+                .filter(Boolean)
+        };
+    } catch (error) {
+        return { users: [] };
+    }
+}
+
+function writeFaceProfileStore(store) {
+    ensureFaceProfileStoreFile();
+    fs.writeFileSync(faceProfileStoreFile, JSON.stringify(store, null, 2));
+}
+
+function hasRecentPasswordVerification(req) {
+    const verifiedAt = Number(req.session?.passwordVerifiedAt || 0);
+    return Number.isFinite(verifiedAt) && verifiedAt > 0 && Date.now() - verifiedAt <= PASSWORD_GATE_TTL_MS;
+}
+
+function findBestFaceMatch(inputDescriptor) {
+    const descriptor = sanitizeFaceDescriptor(inputDescriptor);
+    if (!descriptor) return null;
+
+    const store = readFaceProfileStore();
+    let bestMatch = null;
+    for (const user of store.users) {
+        const distance = faceDistance(descriptor, user.faceDescriptor);
+        if (!bestMatch || distance < bestMatch.distance) {
+            bestMatch = { user, distance };
+        }
+    }
+    if (!bestMatch) return null;
+    if (bestMatch.distance > FACE_MATCH_THRESHOLD) return null;
+    return bestMatch;
+}
+
+function touchFaceProfileLastSeen(userId) {
+    const id = String(userId || '').trim();
+    if (!id) return;
+    const store = readFaceProfileStore();
+    const now = Date.now();
+    const idx = store.users.findIndex((entry) => entry.id === id);
+    if (idx < 0) return;
+    store.users[idx] = {
+        ...store.users[idx],
+        lastSeenAt: now,
+        updatedAt: now
+    };
+    writeFaceProfileStore(store);
+}
+
+// --- authentication routes ---
+app.post('/login/password', (req, res) => {
+    const pwd = String(req.body?.password || '');
+    if (pwd !== PASSWORD) {
+        return res.status(401).json({ success: false, message: 'Invalid password' });
+    }
+    if (req.session) req.session.passwordVerifiedAt = Date.now();
+    return res.json({ success: true, requiresFaceScan: true });
+});
+
+app.post('/login', (req, res) => {
+    const pwd = String(req.body?.password || '');
+    if (pwd !== PASSWORD) {
+        return res.status(401).json({ success: false, message: 'Invalid password' });
+    }
+    if (req.session) req.session.passwordVerifiedAt = Date.now();
+    return res.json({ success: true, requiresFaceScan: true });
+});
+
+app.post('/login/face', (req, res) => {
+    const descriptor = sanitizeFaceDescriptor(req.body?.descriptor);
+    if (!descriptor) {
+        return res.status(400).json({ success: false, message: 'Face descriptor is invalid.' });
+    }
+
+    const bestMatch = findBestFaceMatch(descriptor);
+    if (!bestMatch) {
+        return res.status(404).json({
+            success: false,
+            code: 'FACE_NOT_RECOGNIZED',
+            message: 'Face not recognized. Please enroll as a new user.'
+        });
+    }
+
+    establishAuthenticatedRequest(req, res, bestMatch.user.id);
+    touchFaceProfileLastSeen(bestMatch.user.id);
+    return res.json({
+        success: true,
+        userId: bestMatch.user.id,
+        nickname: bestMatch.user.nickname
+    });
+});
+
+app.post('/login/enroll', (req, res) => {
+    const descriptor = sanitizeFaceDescriptor(req.body?.descriptor);
+    const nickname = sanitizeNickname(req.body?.nickname);
+    const password = String(req.body?.password || '');
+    const isPasswordAllowed = password === PASSWORD || hasRecentPasswordVerification(req);
+
+    if (!isPasswordAllowed) {
+        return res.status(401).json({
+            success: false,
+            message: 'Password verification required before enrollment.'
+        });
+    }
+    if (!descriptor) {
+        return res.status(400).json({ success: false, message: 'Face descriptor is invalid.' });
+    }
+    if (!nickname || !/^[A-Za-z0-9 _.-]{2,32}$/.test(nickname)) {
+        return res.status(400).json({
+            success: false,
+            message: 'Nickname must be 2-32 chars and use letters, numbers, spaces, ., _, or -.'
+        });
+    }
+
+    const existing = findBestFaceMatch(descriptor);
+    if (existing) {
+        return res.status(409).json({
+            success: false,
+            message: 'This face is already enrolled.',
+            userId: existing.user.id,
+            nickname: existing.user.nickname
+        });
+    }
+
+    const store = readFaceProfileStore();
+    const now = Date.now();
+    const userId = `user_${crypto.randomBytes(8).toString('hex')}`;
+    store.users.push({
+        id: userId,
+        nickname,
+        faceDescriptor: descriptor,
+        createdAt: now,
+        updatedAt: now,
+        lastSeenAt: now
+    });
+    writeFaceProfileStore(store);
+
+    establishAuthenticatedRequest(req, res, userId);
+    return res.json({
+        success: true,
+        userId,
+        nickname
+    });
 });
 
 app.get('/logout', (req, res) => {
@@ -627,8 +836,20 @@ app.get('/quick-signin', (req, res) => {
     if (!consumed) {
         return res.status(401).send('Invalid or expired quick sign-in token.');
     }
-    establishAuthenticatedRequest(req, res);
+    establishAuthenticatedRequest(req, res, consumed.ownerSessionId);
     return res.redirect('/chat.html');
+});
+
+app.get('/api/auth/me', requireWhitelistedIp, requireAuth, (req, res) => {
+    const userId = getSessionUserKey(req);
+    const store = readFaceProfileStore();
+    const profile = store.users.find((entry) => entry.id === userId) || null;
+    return res.json({
+        success: true,
+        userId,
+        nickname: profile?.nickname || null,
+        hasFaceProfile: Boolean(profile)
+    });
 });
 
 // --- 1. THE API ENDPOINT ---

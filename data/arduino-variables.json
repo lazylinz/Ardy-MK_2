@@ -39,14 +39,14 @@
       "variables": {
         "led_brightness": {
           "value": 100,
-          "updatedAt": 1772358536536
+          "updatedAt": 1772415065202
         },
         "temp": {
           "value": 21,
           "updatedAt": 1772351510000
         }
       },
-      "updatedAt": 1772358536537
+      "updatedAt": 1772415067166
     }
   }
 }
