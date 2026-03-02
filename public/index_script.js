@@ -15,7 +15,9 @@ const nicknameInput = document.getElementById('nickname');
 const enrollBtn = document.getElementById('enrollBtn');
 
 const FACE_MODEL_URI = 'https://cdn.jsdelivr.net/npm/@vladmandic/face-api/model/';
-const FACE_SAMPLES_REQUIRED = 5;
+const FACE_SAMPLES_REQUIRED = 3;
+const FACE_SCAN_MAX_ATTEMPTS = 40;
+const FACE_SCAN_INTERVAL_MS = 220;
 
 const state = {
   mode: 'password',
@@ -23,6 +25,7 @@ const state = {
   descriptor: null,
   stream: null,
   cameraStarting: null,
+  scanInProgress: false,
   modelsReady: false,
   modelsLoading: null,
 };
@@ -117,8 +120,9 @@ async function startCamera() {
       {
         video: {
           facingMode: 'user',
-          width: { ideal: 720 },
-          height: { ideal: 480 }
+          width: { ideal: 480, max: 640 },
+          height: { ideal: 360, max: 480 },
+          frameRate: { ideal: 15, max: 20 }
         },
         audio: false
       },
@@ -179,14 +183,14 @@ async function captureFaceDescriptor() {
   await startCamera();
 
   const options = new faceapi.TinyFaceDetectorOptions({
-    inputSize: 224,
-    scoreThreshold: 0.45
+    inputSize: 160,
+    scoreThreshold: 0.5
   });
 
   const descriptors = [];
-  const maxAttempts = 80;
+  let misses = 0;
 
-  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+  for (let attempt = 0; attempt < FACE_SCAN_MAX_ATTEMPTS; attempt += 1) {
     const detection = await faceapi
       .detectSingleFace(faceVideo, options)
       .withFaceLandmarks()
@@ -198,9 +202,15 @@ async function captureFaceDescriptor() {
       if (descriptors.length >= FACE_SAMPLES_REQUIRED) {
         return averageDescriptors(descriptors);
       }
+      misses = 0;
+    } else {
+      misses += 1;
+      if (misses > 10) {
+        setMessage('Looking for your face... center your face in the ring and keep still.', 'ok');
+      }
     }
 
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    await new Promise((resolve) => setTimeout(resolve, FACE_SCAN_INTERVAL_MS));
   }
 
   throw new Error('No stable face detected. Ensure your face is centered and well-lit.');
@@ -267,6 +277,8 @@ faceSignInBtn.addEventListener('click', () => {
 });
 
 scanFaceBtn.addEventListener('click', async () => {
+  if (state.scanInProgress) return;
+  state.scanInProgress = true;
   setLoading(scanFaceBtn, true, 'Scanning...', 'Scan Face');
 
   try {
@@ -294,6 +306,7 @@ scanFaceBtn.addEventListener('click', async () => {
   } catch (err) {
     setMessage(`Error: ${err.message}`, 'error');
   } finally {
+    state.scanInProgress = false;
     setLoading(scanFaceBtn, false, 'Scanning...', 'Scan Face');
   }
 });
