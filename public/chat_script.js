@@ -67,6 +67,7 @@ let finalVoiceTranscript = "";
 let preferredArdyVoice = null;
 let activeArdyAudio = null;
 let ttsAbortController = null;
+let pendingVoiceReplyFromStt = false;
 const initialInputHeight = messageInput.scrollHeight;
 
 marked.setOptions({
@@ -182,6 +183,33 @@ const stopArdySpeech = () => {
     }
 };
 
+const waitForAudioReady = (audio) => new Promise((resolve, reject) => {
+    if (!audio) {
+        reject(new Error("Audio is not available"));
+        return;
+    }
+    if (Number.isFinite(audio.duration) && audio.duration > 0) {
+        resolve();
+        return;
+    }
+    const onReady = () => {
+        cleanup();
+        resolve();
+    };
+    const onError = () => {
+        cleanup();
+        reject(new Error("Audio metadata failed to load"));
+    };
+    const cleanup = () => {
+        audio.removeEventListener("loadedmetadata", onReady);
+        audio.removeEventListener("canplaythrough", onReady);
+        audio.removeEventListener("error", onError);
+    };
+    audio.addEventListener("loadedmetadata", onReady, { once: true });
+    audio.addEventListener("canplaythrough", onReady, { once: true });
+    audio.addEventListener("error", onError, { once: true });
+});
+
 const speakAsArdyFallback = (plainText) => {
     if (!plainText || !("speechSynthesis" in window) || typeof SpeechSynthesisUtterance === "undefined") return;
     preferredArdyVoice = preferredArdyVoice || pickPreferredArdyVoice();
@@ -199,10 +227,7 @@ const speakAsArdyFallback = (plainText) => {
     window.speechSynthesis.speak(utterance);
 };
 
-const speakAsArdy = async (text) => {
-    const plainText = stripMarkdownForSpeech(text).slice(0, 1400);
-    if (!plainText) return;
-
+const requestArdyTtsAudio = async (plainText) => {
     stopArdySpeech();
     const abortController = new AbortController();
     ttsAbortController = abortController;
@@ -225,19 +250,8 @@ const speakAsArdy = async (text) => {
         const audioUrl = URL.createObjectURL(audioBlob);
         const audio = new Audio(audioUrl);
         activeArdyAudio = audio;
-        audio.onended = () => {
-            URL.revokeObjectURL(audioUrl);
-            if (activeArdyAudio === audio) activeArdyAudio = null;
-        };
-        audio.onerror = () => {
-            URL.revokeObjectURL(audioUrl);
-            if (activeArdyAudio === audio) activeArdyAudio = null;
-        };
-        await audio.play();
-    } catch (error) {
-        if (error?.name !== "AbortError") {
-            speakAsArdyFallback(plainText);
-        }
+        await waitForAudioReady(audio);
+        return { audio, audioUrl };
     } finally {
         if (ttsAbortController === abortController) {
             ttsAbortController = null;
@@ -245,9 +259,59 @@ const speakAsArdy = async (text) => {
     }
 };
 
-const submitMessageFromInput = () => {
+const streamMessageWhileAudioPlays = async (messageElement, markdownText, audio) => {
+    messageElement.innerHTML = "";
+    let rafId = null;
+    let lastChars = 0;
+    const textLength = markdownText.length;
+    const draw = () => {
+        if (!audio || !Number.isFinite(audio.duration) || audio.duration <= 0) return;
+        const ratio = Math.max(0, Math.min(1, audio.currentTime / audio.duration));
+        const charCount = Math.max(1, Math.floor(textLength * ratio));
+        if (charCount !== lastChars) {
+            lastChars = charCount;
+            messageElement.innerHTML = marked.parse(markdownText.slice(0, charCount));
+            chatBody.scrollTo({ top: chatBody.scrollHeight, behavior: "smooth" });
+        }
+        rafId = requestAnimationFrame(draw);
+    };
+
+    await audio.play();
+    rafId = requestAnimationFrame(draw);
+    await new Promise((resolve) => {
+        audio.onended = () => resolve();
+        audio.onerror = () => resolve();
+    });
+    if (rafId) cancelAnimationFrame(rafId);
+    messageElement.innerHTML = marked.parse(markdownText);
+    chatBody.scrollTo({ top: chatBody.scrollHeight, behavior: "smooth" });
+};
+
+const renderVoiceReplyAfterThinking = async (incomingMessageDiv, messageElement, markdownText) => {
+    const plainText = stripMarkdownForSpeech(markdownText).slice(0, 1400);
+    if (!plainText) {
+        messageElement.innerHTML = marked.parse(markdownText);
+        return;
+    }
+
+    try {
+        const { audio, audioUrl } = await requestArdyTtsAudio(plainText);
+        messageElement.innerHTML = "";
+        await streamMessageWhileAudioPlays(messageElement, markdownText, audio);
+        URL.revokeObjectURL(audioUrl);
+        if (activeArdyAudio === audio) activeArdyAudio = null;
+    } catch (error) {
+        messageElement.innerHTML = marked.parse(markdownText);
+        if (error?.name !== "AbortError") {
+            speakAsArdyFallback(plainText);
+        }
+    }
+};
+
+const submitMessageFromInput = ({ fromVoiceInput = false } = {}) => {
     const text = (messageInput.value || "").trim();
     if (!text) return;
+    pendingVoiceReplyFromStt = Boolean(fromVoiceInput);
     handleOutgoingMessage({ preventDefault: () => {} });
 };
 
@@ -334,7 +398,7 @@ const initializeVoiceInput = () => {
         if (shouldAutoSend) {
             messageInput.value = transcript;
             messageInput.dispatchEvent(new Event("input"));
-            submitMessageFromInput();
+            submitMessageFromInput({ fromVoiceInput: true });
         }
     };
 
@@ -1359,9 +1423,21 @@ const formatAgentToolResult = (name, payload) => {
     return JSON.stringify(payload);
 };
 
-const generateBotResponse = async (incomingMessageDiv, historyContext) => {
+const finalizeIncomingMessageUi = (incomingMessageDiv) => {
+    const finalThinkBox = incomingMessageDiv.querySelector(".thinking-box");
+    if (finalThinkBox) finalThinkBox.classList.remove("thinking-active");
+    const finalLiveLine = incomingMessageDiv.querySelector(".thinking-live-line");
+    if (finalLiveLine) finalLiveLine.textContent = "";
+    incomingMessageDiv.classList.remove("thinking");
+    addMessageActions(incomingMessageDiv, "assistant");
+    chatBody.scrollTo({ top: chatBody.scrollHeight, behavior: "smooth" });
+};
+
+const generateBotResponse = async (incomingMessageDiv, historyContext, options = {}) => {
+    const shouldVoiceReply = Boolean(options?.voiceReply);
     const messageElement = incomingMessageDiv.querySelector(".message-text");
     const messages = [];
+    let skipDefaultFinalize = false;
 
     historyContext.forEach((entry) => {
         if (entry.role === "user" && entry.fileData) {
@@ -2027,7 +2103,11 @@ Then output markdown sections: Team Notes, Final Answer.`
                 chatHistory[historyIndex].currentBranch = 0;
             }
             persistCurrentThread();
-            speakAsArdy(synthesisText);
+            if (shouldVoiceReply) {
+                skipDefaultFinalize = true;
+                await renderVoiceReplyAfterThinking(incomingMessageDiv, messageElement, synthesisText);
+                finalizeIncomingMessageUi(incomingMessageDiv);
+            }
             return;
         }
 
@@ -2134,8 +2214,10 @@ Then output markdown sections: Team Notes, Final Answer.`
 
                         if (delta?.content) {
                             fullText += delta.content;
-                            messageElement.innerHTML = marked.parse(fullText);
-                            chatBody.scrollTo({ top: chatBody.scrollHeight, behavior: "smooth" });
+                            if (!shouldVoiceReply) {
+                                messageElement.innerHTML = marked.parse(fullText);
+                                chatBody.scrollTo({ top: chatBody.scrollHeight, behavior: "smooth" });
+                            }
                         }
                     } catch (err) {
                         throw err;
@@ -2155,7 +2237,7 @@ Then output markdown sections: Team Notes, Final Answer.`
                 historyContext.push({ role: "tool", tool_call_id: toolCall.id, name: "web_search", parts: [{ text: toolResponseContent }] });
 
                 userData.tool = null;
-                await generateBotResponse(incomingMessageDiv, historyContext);
+                await generateBotResponse(incomingMessageDiv, historyContext, options);
                 return;
             }
             if (toolCall.function.name === "visit_site") {
@@ -2166,7 +2248,7 @@ Then output markdown sections: Team Notes, Final Answer.`
                 historyContext.push({ role: "tool", tool_call_id: toolCall.id, name: "visit_site", parts: [{ text: toolResponseContent }] });
 
                 userData.tool = null;
-                await generateBotResponse(incomingMessageDiv, historyContext);
+                await generateBotResponse(incomingMessageDiv, historyContext, options);
                 return;
             }
             if (toolCall.function.name === "create_macro") {
@@ -2177,7 +2259,7 @@ Then output markdown sections: Team Notes, Final Answer.`
                 historyContext.push({ role: "tool", tool_call_id: toolCall.id, name: "create_macro", parts: [{ text: toolResponseContent }] });
 
                 userData.tool = null;
-                await generateBotResponse(incomingMessageDiv, historyContext);
+                await generateBotResponse(incomingMessageDiv, historyContext, options);
                 return;
             }
             if (toolCall.function.name === "get-all-variables") {
@@ -2187,7 +2269,7 @@ Then output markdown sections: Team Notes, Final Answer.`
                 historyContext.push({ role: "tool", tool_call_id: toolCall.id, name: "get-all-variables", parts: [{ text: toolResponseContent }] });
 
                 userData.tool = null;
-                await generateBotResponse(incomingMessageDiv, historyContext);
+                await generateBotResponse(incomingMessageDiv, historyContext, options);
                 return;
             }
             if (toolCall.function.name === "read-variable") {
@@ -2198,7 +2280,7 @@ Then output markdown sections: Team Notes, Final Answer.`
                 historyContext.push({ role: "tool", tool_call_id: toolCall.id, name: "read-variable", parts: [{ text: toolResponseContent }] });
 
                 userData.tool = null;
-                await generateBotResponse(incomingMessageDiv, historyContext);
+                await generateBotResponse(incomingMessageDiv, historyContext, options);
                 return;
             }
             if (toolCall.function.name === "write-variable") {
@@ -2212,7 +2294,7 @@ Then output markdown sections: Team Notes, Final Answer.`
                 historyContext.push({ role: "tool", tool_call_id: toolCall.id, name: "write-variable", parts: [{ text: toolResponseContent }] });
 
                 userData.tool = null;
-                await generateBotResponse(incomingMessageDiv, historyContext);
+                await generateBotResponse(incomingMessageDiv, historyContext, options);
                 return;
             }
             if (toolCall.function.name === "os-time") {
@@ -2223,7 +2305,7 @@ Then output markdown sections: Team Notes, Final Answer.`
                 historyContext.push({ role: "tool", tool_call_id: toolCall.id, name: "os-time", parts: [{ text: toolResponseContent }] });
 
                 userData.tool = null;
-                await generateBotResponse(incomingMessageDiv, historyContext);
+                await generateBotResponse(incomingMessageDiv, historyContext, options);
                 return;
             }
         }
@@ -2236,7 +2318,12 @@ Then output markdown sections: Team Notes, Final Answer.`
                 chatHistory[historyIndex].currentBranch = 0;
             }
             persistCurrentThread();
-            speakAsArdy(fullText);
+            if (shouldVoiceReply) {
+                skipDefaultFinalize = true;
+                await renderVoiceReplyAfterThinking(incomingMessageDiv, messageElement, fullText);
+                finalizeIncomingMessageUi(incomingMessageDiv);
+                return;
+            }
         }
     } catch (error) {
         renderApiError(messageElement, error.message);
@@ -2249,19 +2336,17 @@ Then output markdown sections: Team Notes, Final Answer.`
             persistCurrentThread();
         }
     } finally {
-        const finalThinkBox = incomingMessageDiv.querySelector(".thinking-box");
-        if (finalThinkBox) finalThinkBox.classList.remove("thinking-active");
-        const finalLiveLine = incomingMessageDiv.querySelector(".thinking-live-line");
-        if (finalLiveLine) finalLiveLine.textContent = "";
-        incomingMessageDiv.classList.remove("thinking");
-        addMessageActions(incomingMessageDiv, "assistant");
-        chatBody.scrollTo({ top: chatBody.scrollHeight, behavior: "smooth" });
+        if (!skipDefaultFinalize) {
+            finalizeIncomingMessageUi(incomingMessageDiv);
+        }
     }
 };
 
 const handleOutgoingMessage = async (e) => {
     e.preventDefault();
     stopArdySpeech();
+    const shouldVoiceReply = pendingVoiceReplyFromStt;
+    pendingVoiceReplyFromStt = false;
     userData.message = messageInput.value.trim();
     if (!userData.message) return;
 
@@ -2312,7 +2397,7 @@ const handleOutgoingMessage = async (e) => {
         chatBody.scrollTo({ top: chatBody.scrollHeight, behavior: "smooth" });
 
         userData.tool = currentTool;
-        await generateBotResponse(incomingMessageDiv, chatHistory);
+        await generateBotResponse(incomingMessageDiv, chatHistory, { voiceReply: shouldVoiceReply });
         userData.tool = null;
     }, 600);
 };
