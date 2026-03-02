@@ -7,6 +7,8 @@ const session = require('express-session');
 const https = require('https');
 const crypto = require('crypto');
 const { Readable } = require('stream');
+const { spawn } = require('child_process');
+const os = require('os');
 const selfsigned = require('selfsigned');
 const { createArduinoService, registerArduinoRestRoutes } = require('./arduino-rest-handler');
 let JSDOM = null;
@@ -59,9 +61,11 @@ const IP_WHITELIST = (process.env.IP_WHITELIST || '').split(',').filter(Boolean)
 const SESSION_SECRET = process.env.SESSION_SECRET || 'keyboard cat';
 const IFLOW_API_KEY = process.env.IFLOW_API_KEY || '';
 const IFLOW_API_URL = 'https://apis.iflow.cn/v1/chat/completions';
-const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY || 'sk_cfee1bb27a303ca56ee3dfabca713f8fb65865f7189ddec1';
-const ELEVENLABS_VOICE_ID = process.env.ELEVENLABS_VOICE_ID || 'pNInz6obpgDQGcFmaJgB';
-const ELEVENLABS_MODEL_ID = process.env.ELEVENLABS_MODEL_ID || 'eleven_multilingual_v2';
+const PIPER_COMMAND = process.env.PIPER_COMMAND || 'python';
+const PIPER_COMMAND_ARGS = (process.env.PIPER_COMMAND_ARGS || '-m piper').split(' ').filter(Boolean);
+const PIPER_VOICE_MODEL = process.env.PIPER_VOICE_MODEL || 'en_US-lessac-medium';
+const PIPER_SPEAKER = process.env.PIPER_SPEAKER || '';
+const PIPER_EXTRA_ARGS = (process.env.PIPER_EXTRA_ARGS || '').split(' ').filter(Boolean);
 const AUTH_COOKIE_NAME = 'ardy_auth';
 const AUTH_COOKIE_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
 const QUICK_SIGNIN_TTL_MS = 5 * 60 * 1000;
@@ -925,62 +929,120 @@ app.post('/api/iflow/chat', requireWhitelistedIp, requireAuth, async (req, res) 
     }
 });
 
-app.post('/api/voice/ardy', requireWhitelistedIp, requireAuth, async (req, res) => {
-    if (!ELEVENLABS_API_KEY) {
-        return res.status(500).json({ error: { message: 'ELEVENLABS_API_KEY is not configured on the server.' } });
-    }
+function runProcess(command, args, options = {}) {
+    return new Promise((resolve, reject) => {
+        const proc = spawn(command, args, { windowsHide: true, ...options });
+        let stdout = '';
+        let stderr = '';
+        if (proc.stdout) {
+            proc.stdout.on('data', (chunk) => {
+                stdout += String(chunk || '');
+            });
+        }
+        if (proc.stderr) {
+            proc.stderr.on('data', (chunk) => {
+                stderr += String(chunk || '');
+            });
+        }
+        proc.on('error', reject);
+        proc.on('close', (code) => {
+            if (code !== 0) {
+                reject(new Error(stderr.trim() || stdout.trim() || `process exited with code ${code}`));
+                return;
+            }
+            resolve({ stdout, stderr });
+        });
+        if (options.stdinText != null && proc.stdin) {
+            proc.stdin.write(String(options.stdinText));
+            proc.stdin.end();
+        }
+    });
+}
 
+function resolvePiperModel(model, piperDir) {
+    const raw = String(model || '').trim();
+    if (raw.endsWith('.onnx') || raw.includes('/') || raw.includes('\\')) {
+        const absModelPath = path.isAbsolute(raw) ? raw : path.resolve(raw);
+        const voiceName = path.basename(absModelPath, '.onnx');
+        return { voiceName, modelPath: absModelPath };
+    }
+    return {
+        voiceName: raw,
+        modelPath: path.join(piperDir, `${raw}.onnx`)
+    };
+}
+
+async function ensurePiperVoiceModel(voiceName, modelPath, piperDir) {
+    const configPath = `${modelPath}.json`;
+    if (fs.existsSync(modelPath) && fs.existsSync(configPath)) {
+        return;
+    }
+    await runProcess(PIPER_COMMAND, ['-m', 'piper.download_voices', voiceName, '--data-dir', piperDir]);
+}
+
+function runPiperTts({ text, modelPath, speaker }) {
+    return new Promise((resolve, reject) => {
+        const piperDir = path.join(dataDir, 'piper');
+        const tempOut = path.join(os.tmpdir(), `ardy-tts-${Date.now()}-${crypto.randomUUID()}.wav`);
+        fs.mkdirSync(piperDir, { recursive: true });
+
+        const args = [
+            ...PIPER_COMMAND_ARGS,
+            '--model', modelPath,
+            '--output_file', tempOut,
+            '--data-dir', piperDir
+        ];
+        if (speaker) args.push('--speaker', speaker);
+        if (PIPER_EXTRA_ARGS.length) args.push(...PIPER_EXTRA_ARGS);
+
+        runProcess(PIPER_COMMAND, args, { stdinText: String(text || '') })
+            .then(() => {
+                try {
+                    const wav = fs.readFileSync(tempOut);
+                    resolve(wav);
+                } catch (error) {
+                    reject(error);
+                } finally {
+                    try {
+                        if (fs.existsSync(tempOut)) fs.unlinkSync(tempOut);
+                    } catch (error) {}
+                }
+            })
+            .catch((error) => {
+                try {
+                    if (fs.existsSync(tempOut)) fs.unlinkSync(tempOut);
+                } catch (cleanupError) {}
+                reject(error);
+            });
+    });
+}
+
+app.post('/api/voice/ardy', requireWhitelistedIp, requireAuth, async (req, res) => {
     const text = String(req.body?.text || '').replace(/\s+/g, ' ').trim();
     if (!text) {
         return res.status(400).json({ error: { message: 'text is required' } });
     }
 
-    const voiceId = String(req.body?.voiceId || ELEVENLABS_VOICE_ID || '').trim() || ELEVENLABS_VOICE_ID;
-    const modelId = String(req.body?.modelId || ELEVENLABS_MODEL_ID || '').trim() || ELEVENLABS_MODEL_ID;
-    const languageCode = String(req.body?.languageCode || '').trim();
-    const outputFormat = 'mp3_44100_128';
-    const payload = {
-        text: text.slice(0, 1800),
-        model_id: modelId,
-        voice_settings: {
-            stability: 0.45,
-            similarity_boost: 0.75,
-            style: 0.2,
-            use_speaker_boost: true
-        }
-    };
-    if (languageCode) payload.language_code = languageCode;
+    const model = String(req.body?.model || PIPER_VOICE_MODEL || '').trim() || PIPER_VOICE_MODEL;
+    const speakerRaw = String(req.body?.speaker ?? PIPER_SPEAKER ?? '').trim();
+    const speaker = speakerRaw ? speakerRaw : '';
+    const piperDir = path.join(dataDir, 'piper');
+    const { voiceName, modelPath } = resolvePiperModel(model, piperDir);
 
     try {
-        const upstream = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(voiceId)}/stream?output_format=${outputFormat}`, {
-            method: 'POST',
-            headers: {
-                'xi-api-key': ELEVENLABS_API_KEY,
-                'Content-Type': 'application/json',
-                'Accept': 'audio/mpeg'
-            },
-            body: JSON.stringify(payload)
-        });
-
-        if (!upstream.ok || !upstream.body) {
-            const errText = await upstream.text().catch(() => '');
-            let parsed = null;
-            try {
-                parsed = JSON.parse(errText);
-            } catch (error) {}
-            const message = parsed?.detail?.message
-                || parsed?.error?.message
-                || `ElevenLabs TTS request failed (${upstream.status} ${upstream.statusText})`;
-            return res.status(upstream.status || 500).json({ error: { message } });
-        }
-
+        await ensurePiperVoiceModel(voiceName, modelPath, piperDir);
+        const wavBuffer = await runPiperTts({ text: text.slice(0, 1800), modelPath, speaker });
         res.status(200);
-        res.setHeader('Content-Type', 'audio/mpeg');
+        res.setHeader('Content-Type', 'audio/wav');
         res.setHeader('Cache-Control', 'no-store');
-        res.setHeader('X-Ardy-TTS', 'elevenlabs');
-        Readable.fromWeb(upstream.body).pipe(res);
+        res.setHeader('X-Ardy-TTS', 'piper');
+        return res.send(wavBuffer);
     } catch (error) {
-        return res.status(500).json({ error: { message: error.message } });
+        const msg = String(error?.message || 'Unknown Piper error');
+        const installHint = msg.includes('No module named piper') || msg.includes('not recognized')
+            ? 'Local Piper is not installed. Run: python -m pip install piper-tts'
+            : `Local Piper TTS failed: ${msg}`;
+        return res.status(500).json({ error: { message: installHint } });
     }
 });
 
