@@ -61,11 +61,10 @@ const IP_WHITELIST = (process.env.IP_WHITELIST || '').split(',').filter(Boolean)
 const SESSION_SECRET = process.env.SESSION_SECRET || 'keyboard cat';
 const IFLOW_API_KEY = process.env.IFLOW_API_KEY || '';
 const IFLOW_API_URL = 'https://apis.iflow.cn/v1/chat/completions';
-const PIPER_COMMAND = process.env.PIPER_COMMAND || 'python';
-const PIPER_COMMAND_ARGS = (process.env.PIPER_COMMAND_ARGS || '-m piper').split(' ').filter(Boolean);
-const PIPER_VOICE_MODEL = process.env.PIPER_VOICE_MODEL || 'en_US-lessac-medium';
-const PIPER_SPEAKER = process.env.PIPER_SPEAKER || '';
-const PIPER_EXTRA_ARGS = (process.env.PIPER_EXTRA_ARGS || '').split(' ').filter(Boolean);
+const KOKORO_COMMAND = process.env.KOKORO_COMMAND || 'python';
+const KOKORO_VOICE = process.env.KOKORO_VOICE || 'am_adam';
+const KOKORO_LANG = process.env.KOKORO_LANG || 'en-us';
+const KOKORO_SPEED = Number(process.env.KOKORO_SPEED || 1);
 const AUTH_COOKIE_NAME = 'ardy_auth';
 const AUTH_COOKIE_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
 const QUICK_SIGNIN_TTL_MS = 5 * 60 * 1000;
@@ -959,62 +958,29 @@ function runProcess(command, args, options = {}) {
     });
 }
 
-function resolvePiperModel(model, piperDir) {
-    const raw = String(model || '').trim();
-    if (raw.endsWith('.onnx') || raw.includes('/') || raw.includes('\\')) {
-        const absModelPath = path.isAbsolute(raw) ? raw : path.resolve(raw);
-        const voiceName = path.basename(absModelPath, '.onnx');
-        return { voiceName, modelPath: absModelPath };
+const KOKORO_MODEL_URL = 'https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.int8.onnx';
+const KOKORO_VOICES_URL = 'https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin';
+
+async function downloadFile(url, targetPath) {
+    const response = await fetch(url);
+    if (!response.ok) {
+        throw new Error(`Failed to download ${url} (${response.status} ${response.statusText})`);
     }
-    return {
-        voiceName: raw,
-        modelPath: path.join(piperDir, `${raw}.onnx`)
-    };
+    const bytes = Buffer.from(await response.arrayBuffer());
+    fs.writeFileSync(targetPath, bytes);
 }
 
-async function ensurePiperVoiceModel(voiceName, modelPath, piperDir) {
-    const configPath = `${modelPath}.json`;
-    if (fs.existsSync(modelPath) && fs.existsSync(configPath)) {
-        return;
+async function ensureKokoroAssets(kokoroDir) {
+    fs.mkdirSync(kokoroDir, { recursive: true });
+    const modelPath = path.join(kokoroDir, 'kokoro-v1.0.int8.onnx');
+    const voicesPath = path.join(kokoroDir, 'voices-v1.0.bin');
+    if (!fs.existsSync(modelPath)) {
+        await downloadFile(KOKORO_MODEL_URL, modelPath);
     }
-    await runProcess(PIPER_COMMAND, ['-m', 'piper.download_voices', voiceName, '--data-dir', piperDir]);
-}
-
-function runPiperTts({ text, modelPath, speaker }) {
-    return new Promise((resolve, reject) => {
-        const piperDir = path.join(dataDir, 'piper');
-        const tempOut = path.join(os.tmpdir(), `ardy-tts-${Date.now()}-${crypto.randomUUID()}.wav`);
-        fs.mkdirSync(piperDir, { recursive: true });
-
-        const args = [
-            ...PIPER_COMMAND_ARGS,
-            '--model', modelPath,
-            '--output_file', tempOut,
-            '--data-dir', piperDir
-        ];
-        if (speaker) args.push('--speaker', speaker);
-        if (PIPER_EXTRA_ARGS.length) args.push(...PIPER_EXTRA_ARGS);
-
-        runProcess(PIPER_COMMAND, args, { stdinText: String(text || '') })
-            .then(() => {
-                try {
-                    const wav = fs.readFileSync(tempOut);
-                    resolve(wav);
-                } catch (error) {
-                    reject(error);
-                } finally {
-                    try {
-                        if (fs.existsSync(tempOut)) fs.unlinkSync(tempOut);
-                    } catch (error) {}
-                }
-            })
-            .catch((error) => {
-                try {
-                    if (fs.existsSync(tempOut)) fs.unlinkSync(tempOut);
-                } catch (cleanupError) {}
-                reject(error);
-            });
-    });
+    if (!fs.existsSync(voicesPath)) {
+        await downloadFile(KOKORO_VOICES_URL, voicesPath);
+    }
+    return { modelPath, voicesPath };
 }
 
 app.post('/api/voice/ardy', requireWhitelistedIp, requireAuth, async (req, res) => {
@@ -1023,26 +989,42 @@ app.post('/api/voice/ardy', requireWhitelistedIp, requireAuth, async (req, res) 
         return res.status(400).json({ error: { message: 'text is required' } });
     }
 
-    const model = String(req.body?.model || PIPER_VOICE_MODEL || '').trim() || PIPER_VOICE_MODEL;
-    const speakerRaw = String(req.body?.speaker ?? PIPER_SPEAKER ?? '').trim();
-    const speaker = speakerRaw ? speakerRaw : '';
-    const piperDir = path.join(dataDir, 'piper');
-    const { voiceName, modelPath } = resolvePiperModel(model, piperDir);
+    const voice = String(req.body?.voice || KOKORO_VOICE || '').trim() || KOKORO_VOICE;
+    const lang = String(req.body?.lang || req.body?.languageCode || KOKORO_LANG || '').trim() || KOKORO_LANG;
+    const speedRaw = Number(req.body?.speed ?? KOKORO_SPEED);
+    const speed = Number.isFinite(speedRaw) && speedRaw > 0 ? speedRaw : 1;
+    const kokoroDir = path.join(dataDir, 'kokoro');
+    const tempOut = path.join(os.tmpdir(), `ardy-kokoro-${Date.now()}-${crypto.randomUUID()}.wav`);
+    const scriptPath = path.join(__dirname, 'kokoro_tts.py');
 
     try {
-        await ensurePiperVoiceModel(voiceName, modelPath, piperDir);
-        const wavBuffer = await runPiperTts({ text: text.slice(0, 1800), modelPath, speaker });
+        const { modelPath, voicesPath } = await ensureKokoroAssets(kokoroDir);
+        const args = [
+            scriptPath,
+            '--model', modelPath,
+            '--voices', voicesPath,
+            '--voice', voice,
+            '--lang', lang,
+            '--speed', String(speed),
+            '--output', tempOut
+        ];
+        await runProcess(KOKORO_COMMAND, args, { stdinText: text.slice(0, 1800) });
+        const wavBuffer = fs.readFileSync(tempOut);
         res.status(200);
         res.setHeader('Content-Type', 'audio/wav');
         res.setHeader('Cache-Control', 'no-store');
-        res.setHeader('X-Ardy-TTS', 'piper');
+        res.setHeader('X-Ardy-TTS', 'kokoro');
         return res.send(wavBuffer);
     } catch (error) {
-        const msg = String(error?.message || 'Unknown Piper error');
-        const installHint = msg.includes('No module named piper') || msg.includes('not recognized')
-            ? 'Local Piper is not installed. Run: python -m pip install piper-tts'
-            : `Local Piper TTS failed: ${msg}`;
+        const msg = String(error?.message || 'Unknown Kokoro error');
+        const installHint = msg.includes('No module named kokoro_onnx') || msg.includes('not recognized')
+            ? 'Local Kokoro is not installed. Run: python -m pip install kokoro-onnx'
+            : `Local Kokoro TTS failed: ${msg}`;
         return res.status(500).json({ error: { message: installHint } });
+    } finally {
+        try {
+            if (fs.existsSync(tempOut)) fs.unlinkSync(tempOut);
+        } catch (cleanupError) {}
     }
 });
 
