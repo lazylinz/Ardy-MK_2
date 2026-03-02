@@ -22,6 +22,7 @@ const state = {
   afterPasswordGate: false,
   descriptor: null,
   stream: null,
+  cameraStarting: null,
   modelsReady: false,
   modelsLoading: null,
 };
@@ -35,6 +36,24 @@ function setMessage(text, type) {
 function setLoading(button, isLoading, loadingText, defaultText) {
   button.disabled = isLoading;
   button.textContent = isLoading ? loadingText : defaultText;
+}
+
+function getCameraErrorMessage(err) {
+  const name = String(err?.name || '').toLowerCase();
+  const message = String(err?.message || '').trim();
+  if (name === 'notallowederror' || name === 'securityerror') {
+    return 'Camera permission was denied. Allow camera access and try again.';
+  }
+  if (name === 'notfounderror' || name === 'devicesnotfounderror') {
+    return 'No camera device was found on this system.';
+  }
+  if (name === 'notreadableerror' || /could not start video source/i.test(message)) {
+    return 'Camera is busy or blocked by another app/tab. Close other camera apps and retry.';
+  }
+  if (name === 'overconstrainederror') {
+    return 'Camera constraints were unsupported. Retrying with a basic camera profile is required.';
+  }
+  return message || 'Unable to access camera.';
 }
 
 function setStage(stage) {
@@ -88,17 +107,49 @@ async function loadFaceModels() {
 
 async function startCamera() {
   if (state.stream) return;
-  const stream = await navigator.mediaDevices.getUserMedia({
-    video: {
-      facingMode: 'user',
-      width: { ideal: 720 },
-      height: { ideal: 480 }
-    },
-    audio: false
-  });
-  state.stream = stream;
-  faceVideo.srcObject = stream;
-  await faceVideo.play();
+  if (state.cameraStarting) {
+    await state.cameraStarting;
+    return;
+  }
+
+  state.cameraStarting = (async () => {
+    const constraintProfiles = [
+      {
+        video: {
+          facingMode: 'user',
+          width: { ideal: 720 },
+          height: { ideal: 480 }
+        },
+        audio: false
+      },
+      { video: true, audio: false }
+    ];
+
+    let lastError = null;
+    for (const constraints of constraintProfiles) {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia(constraints);
+        if (state.stream) {
+          stream.getTracks().forEach((track) => track.stop());
+          return;
+        }
+        state.stream = stream;
+        faceVideo.srcObject = stream;
+        await faceVideo.play().catch(() => undefined);
+        return;
+      } catch (err) {
+        lastError = err;
+        await new Promise((resolve) => setTimeout(resolve, 150));
+      }
+    }
+    throw new Error(getCameraErrorMessage(lastError));
+  })();
+
+  try {
+    await state.cameraStarting;
+  } finally {
+    state.cameraStarting = null;
+  }
 }
 
 function stopCamera() {
