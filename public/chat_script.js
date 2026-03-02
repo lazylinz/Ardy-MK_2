@@ -30,6 +30,7 @@ const ARDUINO_READ_VARIABLE_API_URL = "/api/arduino/read-variable";
 const ARDUINO_WRITE_VARIABLE_API_URL = "/api/arduino/write-variable";
 const OS_TIME_API_URL = "/api/os/time";
 const QUICK_SIGNIN_TOKEN_API_URL = "/api/quick-signin-token";
+const ARDY_TTS_API_URL = "/api/voice/ardy";
 const CHAT_QUERY_PARAM = "chat";
 const MODEL_STORAGE_KEY = "ardy_selected_text_model_v1";
 const MULTI_AGENT_MODE_STORAGE_KEY = "ardy_multi_agent_mode_v1";
@@ -64,6 +65,8 @@ let isListeningToVoice = false;
 let manualVoiceStop = false;
 let finalVoiceTranscript = "";
 let preferredArdyVoice = null;
+let activeArdyAudio = null;
+let ttsAbortController = null;
 const initialInputHeight = messageInput.scrollHeight;
 
 marked.setOptions({
@@ -164,24 +167,82 @@ const stripMarkdownForSpeech = (text) => {
     return container.textContent.replace(/\s+/g, " ").trim();
 };
 
-const speakAsArdy = (text) => {
-    if (!text || !("speechSynthesis" in window) || typeof SpeechSynthesisUtterance === "undefined") return;
-    const plainText = stripMarkdownForSpeech(text).slice(0, 1400);
-    if (!plainText) return;
+const stopArdySpeech = () => {
+    if (ttsAbortController) {
+        ttsAbortController.abort();
+        ttsAbortController = null;
+    }
+    if (activeArdyAudio) {
+        activeArdyAudio.pause();
+        activeArdyAudio.src = "";
+        activeArdyAudio = null;
+    }
+    if ("speechSynthesis" in window) {
+        window.speechSynthesis.cancel();
+    }
+};
 
+const speakAsArdyFallback = (plainText) => {
+    if (!plainText || !("speechSynthesis" in window) || typeof SpeechSynthesisUtterance === "undefined") return;
     preferredArdyVoice = preferredArdyVoice || pickPreferredArdyVoice();
     const utterance = new SpeechSynthesisUtterance(plainText);
     if (preferredArdyVoice) {
         utterance.voice = preferredArdyVoice;
         utterance.lang = preferredArdyVoice.lang || "en-US";
     } else {
-        utterance.lang = navigator.language || "en-US";
+        utterance.lang = "en-US";
     }
-    utterance.rate = 1;
-    utterance.pitch = 0.88;
+    utterance.rate = 0.96;
+    utterance.pitch = 0.86;
     utterance.volume = 1;
     window.speechSynthesis.cancel();
     window.speechSynthesis.speak(utterance);
+};
+
+const speakAsArdy = async (text) => {
+    const plainText = stripMarkdownForSpeech(text).slice(0, 1400);
+    if (!plainText) return;
+
+    stopArdySpeech();
+    const abortController = new AbortController();
+    ttsAbortController = abortController;
+    try {
+        const response = await fetch(ARDY_TTS_API_URL, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                text: plainText,
+                languageCode: String(navigator.language || "en-US").split("-")[0]
+            }),
+            signal: abortController.signal
+        });
+        if (!response.ok) {
+            throw new Error(`TTS request failed (${response.status})`);
+        }
+        const audioBlob = await response.blob();
+        if (!audioBlob.size) throw new Error("Empty TTS audio");
+
+        const audioUrl = URL.createObjectURL(audioBlob);
+        const audio = new Audio(audioUrl);
+        activeArdyAudio = audio;
+        audio.onended = () => {
+            URL.revokeObjectURL(audioUrl);
+            if (activeArdyAudio === audio) activeArdyAudio = null;
+        };
+        audio.onerror = () => {
+            URL.revokeObjectURL(audioUrl);
+            if (activeArdyAudio === audio) activeArdyAudio = null;
+        };
+        await audio.play();
+    } catch (error) {
+        if (error?.name !== "AbortError") {
+            speakAsArdyFallback(plainText);
+        }
+    } finally {
+        if (ttsAbortController === abortController) {
+            ttsAbortController = null;
+        }
+    }
 };
 
 const submitMessageFromInput = () => {
@@ -2200,6 +2261,7 @@ Then output markdown sections: Team Notes, Final Answer.`
 
 const handleOutgoingMessage = async (e) => {
     e.preventDefault();
+    stopArdySpeech();
     userData.message = messageInput.value.trim();
     if (!userData.message) return;
 

@@ -59,6 +59,9 @@ const IP_WHITELIST = (process.env.IP_WHITELIST || '').split(',').filter(Boolean)
 const SESSION_SECRET = process.env.SESSION_SECRET || 'keyboard cat';
 const IFLOW_API_KEY = process.env.IFLOW_API_KEY || '';
 const IFLOW_API_URL = 'https://apis.iflow.cn/v1/chat/completions';
+const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY || 'sk_cfee1bb27a303ca56ee3dfabca713f8fb65865f7189ddec1';
+const ELEVENLABS_VOICE_ID = process.env.ELEVENLABS_VOICE_ID || 'pNInz6obpgDQGcFmaJgB';
+const ELEVENLABS_MODEL_ID = process.env.ELEVENLABS_MODEL_ID || 'eleven_multilingual_v2';
 const AUTH_COOKIE_NAME = 'ardy_auth';
 const AUTH_COOKIE_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
 const QUICK_SIGNIN_TTL_MS = 5 * 60 * 1000;
@@ -917,6 +920,65 @@ app.post('/api/iflow/chat', requireWhitelistedIp, requireAuth, async (req, res) 
 
         const data = await upstream.json().catch(() => ({ error: { message: 'Invalid response from iFlow.' } }));
         return res.status(upstream.status).json(data);
+    } catch (error) {
+        return res.status(500).json({ error: { message: error.message } });
+    }
+});
+
+app.post('/api/voice/ardy', requireWhitelistedIp, requireAuth, async (req, res) => {
+    if (!ELEVENLABS_API_KEY) {
+        return res.status(500).json({ error: { message: 'ELEVENLABS_API_KEY is not configured on the server.' } });
+    }
+
+    const text = String(req.body?.text || '').replace(/\s+/g, ' ').trim();
+    if (!text) {
+        return res.status(400).json({ error: { message: 'text is required' } });
+    }
+
+    const voiceId = String(req.body?.voiceId || ELEVENLABS_VOICE_ID || '').trim() || ELEVENLABS_VOICE_ID;
+    const modelId = String(req.body?.modelId || ELEVENLABS_MODEL_ID || '').trim() || ELEVENLABS_MODEL_ID;
+    const languageCode = String(req.body?.languageCode || '').trim();
+    const outputFormat = 'mp3_44100_128';
+    const payload = {
+        text: text.slice(0, 1800),
+        model_id: modelId,
+        voice_settings: {
+            stability: 0.45,
+            similarity_boost: 0.75,
+            style: 0.2,
+            use_speaker_boost: true
+        }
+    };
+    if (languageCode) payload.language_code = languageCode;
+
+    try {
+        const upstream = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(voiceId)}/stream?output_format=${outputFormat}`, {
+            method: 'POST',
+            headers: {
+                'xi-api-key': ELEVENLABS_API_KEY,
+                'Content-Type': 'application/json',
+                'Accept': 'audio/mpeg'
+            },
+            body: JSON.stringify(payload)
+        });
+
+        if (!upstream.ok || !upstream.body) {
+            const errText = await upstream.text().catch(() => '');
+            let parsed = null;
+            try {
+                parsed = JSON.parse(errText);
+            } catch (error) {}
+            const message = parsed?.detail?.message
+                || parsed?.error?.message
+                || `ElevenLabs TTS request failed (${upstream.status} ${upstream.statusText})`;
+            return res.status(upstream.status || 500).json({ error: { message } });
+        }
+
+        res.status(200);
+        res.setHeader('Content-Type', 'audio/mpeg');
+        res.setHeader('Cache-Control', 'no-store');
+        res.setHeader('X-Ardy-TTS', 'elevenlabs');
+        Readable.fromWeb(upstream.body).pipe(res);
     } catch (error) {
         return res.status(500).json({ error: { message: error.message } });
     }
