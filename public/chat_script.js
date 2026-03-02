@@ -16,8 +16,11 @@ const quickSigninModal = document.querySelector("#quick-signin-modal");
 const quickSigninClose = document.querySelector("#quick-signin-close");
 const quickSigninQrImage = document.querySelector("#quick-signin-qr-image");
 const quickSigninUrlText = document.querySelector("#quick-signin-url");
+const viewerName = document.querySelector("#viewer-name");
+const viewerId = document.querySelector("#viewer-id");
 
 const CHAT_STATE_API_URL = "/api/chats";
+const AUTH_ME_API_URL = "/api/auth/me";
 const WEB_SEARCH_API_URL = "/api/web-search";
 const VISIT_SITE_API_URL = "/api/visit-site";
 const MACROS_API_URL = "/api/macros";
@@ -372,6 +375,56 @@ const getCurrentChatIdFromUrl = () => {
     const params = new URLSearchParams(window.location.search);
     const id = params.get(CHAT_QUERY_PARAM);
     return id && id.trim() ? id.trim() : null;
+};
+
+const shortenUserId = (userId) => {
+    const raw = String(userId || "").trim();
+    if (!raw) return "unknown";
+    if (raw.length <= 20) return raw;
+    return `${raw.slice(0, 10)}...${raw.slice(-6)}`;
+};
+
+const renderViewerIdentity = ({ nickname = "", userId = "", hasFaceProfile = false, error = "" } = {}) => {
+    if (!viewerName || !viewerId) return;
+
+    if (error) {
+        viewerName.textContent = "Unavailable";
+        viewerId.textContent = error;
+        return;
+    }
+
+    const resolvedUserId = String(userId || "").trim();
+    const resolvedNickname = String(nickname || "").trim();
+    if (resolvedNickname) {
+        viewerName.textContent = resolvedNickname;
+    } else if (hasFaceProfile) {
+        viewerName.textContent = "Face profile";
+    } else {
+        viewerName.textContent = "Session user";
+    }
+
+    viewerId.textContent = resolvedUserId ? `ID: ${shortenUserId(resolvedUserId)}` : "ID unavailable";
+};
+
+const loadViewerIdentity = async () => {
+    if (viewerName) viewerName.textContent = "Loading...";
+    if (viewerId) viewerId.textContent = "Fetching profile";
+
+    try {
+        const response = await fetch(AUTH_ME_API_URL, { method: "GET" });
+        const payload = await response.json().catch(() => null);
+        if (!response.ok) {
+            throw new Error(payload?.message || `${response.status} ${response.statusText}`);
+        }
+
+        renderViewerIdentity({
+            nickname: payload?.nickname,
+            userId: payload?.userId,
+            hasFaceProfile: Boolean(payload?.hasFaceProfile)
+        });
+    } catch (error) {
+        renderViewerIdentity({ error: "Could not load profile" });
+    }
 };
 
 const setChatUrl = (threadId, replace = false) => {
@@ -2327,4 +2380,5 @@ document.addEventListener("keydown", (e) => {
 
 initializeModelSelector();
 initializeMultiAgentToggle();
+loadViewerIdentity();
 initializeThreads();
