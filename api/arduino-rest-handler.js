@@ -169,10 +169,13 @@ function registerArduinoRestRoutes(app, options = {}) {
     if (!dataDir) {
         throw new Error('registerArduinoRestRoutes: dataDir is required');
     }
+    const resolveSessionId = typeof options.resolveSessionId === 'function'
+        ? options.resolveSessionId
+        : ((req) => String(req?.authSessionId || req?.session?.userKey || req?.sessionID || '').trim());
 
     app.post('/api/arduino/get-all-variables', requireWhitelistedIp, requireAuth, async (req, res) => {
         try {
-            const payload = await service.getAllVariables({ sessionId: req.sessionID });
+            const payload = await service.getAllVariables({ sessionId: resolveSessionId(req) });
             return res.json(payload);
         } catch (error) {
             return res.status(getHttpStatus(error)).json({ error: { message: formatCloudError(error) } });
@@ -181,7 +184,7 @@ function registerArduinoRestRoutes(app, options = {}) {
 
     app.post('/api/arduino/read-variable', requireWhitelistedIp, requireAuth, async (req, res) => {
         try {
-            const payload = await service.readVariable({ sessionId: req.sessionID, name: req.body?.name });
+            const payload = await service.readVariable({ sessionId: resolveSessionId(req), name: req.body?.name });
             return res.json(payload);
         } catch (error) {
             return res.status(getHttpStatus(error)).json({ error: { message: formatCloudError(error) } });
@@ -194,7 +197,7 @@ function registerArduinoRestRoutes(app, options = {}) {
                 return res.status(400).json({ error: { message: 'value is required' } });
             }
             const payload = await service.writeVariable({
-                sessionId: req.sessionID,
+                sessionId: resolveSessionId(req),
                 name: req.body?.name,
                 value: req.body?.value,
                 sourceMacroId: req.body?.sourceMacroId,

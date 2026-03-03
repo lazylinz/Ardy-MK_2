@@ -61,6 +61,14 @@ const IFLOW_API_KEY = process.env.IFLOW_API_KEY || '';
 const IFLOW_API_URL = 'https://apis.iflow.cn/v1/chat/completions';
 const AUTH_COOKIE_NAME = 'ardy_auth';
 const AUTH_COOKIE_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
+const AUTH_COOKIE_DOMAIN = String(process.env.AUTH_COOKIE_DOMAIN || '').trim() || undefined;
+const AUTH_COOKIE_SAMESITE = String(process.env.AUTH_COOKIE_SAMESITE || 'lax').trim().toLowerCase() === 'none'
+    ? 'none'
+    : 'lax';
+const CORS_ALLOWLIST = String(process.env.CORS_ALLOWLIST || '')
+    .split(',')
+    .map((item) => item.trim())
+    .filter(Boolean);
 const QUICK_SIGNIN_TTL_MS = 5 * 60 * 1000;
 const PASSWORD_GATE_TTL_MS = 10 * 60 * 1000;
 const FACE_MATCH_THRESHOLD = Number(process.env.FACE_MATCH_THRESHOLD || 0.47);
@@ -448,7 +456,15 @@ async function visitSite(url, locale) {
 
 
 // Middleware ----------------------------------------------------------------
-app.use(cors()); // Enable CORS for all routes
+app.use(cors({
+    credentials: true,
+    origin(origin, callback) {
+        if (!origin) return callback(null, true);
+        if (CORS_ALLOWLIST.length === 0) return callback(null, true);
+        if (CORS_ALLOWLIST.includes(origin)) return callback(null, true);
+        return callback(null, false);
+    }
+}));
 app.use(express.json({ limit: '20mb' })); // Parse JSON bodies
 app.use(express.urlencoded({ extended: true, limit: '20mb' })); // Parse form bodies (for login)
 app.use(
@@ -531,10 +547,12 @@ function getSignedAuth(req) {
 function setAuthCookie(req, res, sessionId) {
     const forwardedProto = String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim();
     const shouldUseSecure = IS_VERCEL || forwardedProto === 'https' || req.secure;
+    const sameSite = AUTH_COOKIE_SAMESITE === 'none' && !shouldUseSecure ? 'lax' : AUTH_COOKIE_SAMESITE;
     res.cookie(AUTH_COOKIE_NAME, createAuthToken(sessionId), {
         httpOnly: true,
-        sameSite: 'lax',
+        sameSite,
         secure: shouldUseSecure,
+        domain: AUTH_COOKIE_DOMAIN,
         path: '/',
         maxAge: AUTH_COOKIE_MAX_AGE_MS
     });
@@ -543,10 +561,12 @@ function setAuthCookie(req, res, sessionId) {
 function clearAuthCookie(req, res) {
     const forwardedProto = String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim();
     const shouldUseSecure = IS_VERCEL || forwardedProto === 'https' || req.secure;
+    const sameSite = AUTH_COOKIE_SAMESITE === 'none' && !shouldUseSecure ? 'lax' : AUTH_COOKIE_SAMESITE;
     res.clearCookie(AUTH_COOKIE_NAME, {
         httpOnly: true,
-        sameSite: 'lax',
+        sameSite,
         secure: shouldUseSecure,
+        domain: AUTH_COOKIE_DOMAIN,
         path: '/'
     });
 }
@@ -1065,7 +1085,8 @@ registerArduinoRestRoutes(app, {
     requireWhitelistedIp,
     requireAuth,
     dataDir,
-    service: arduinoService
+    service: arduinoService,
+    resolveSessionId: getSessionUserKey
 });
 
 startMacroRuntimeEngine(arduinoService);
@@ -1654,6 +1675,31 @@ function sanitizeThreads(rawThreads) {
     }));
 }
 
+function mergeThreads(existingThreads, incomingThreads) {
+    const existing = sanitizeThreads(existingThreads);
+    const incoming = sanitizeThreads(incomingThreads);
+    const byId = new Map();
+
+    existing.forEach((thread) => {
+        byId.set(thread.id, thread);
+    });
+
+    incoming.forEach((thread) => {
+        const prior = byId.get(thread.id);
+        if (!prior) {
+            byId.set(thread.id, thread);
+            return;
+        }
+        const incomingUpdated = Number(thread.updatedAt || 0);
+        const priorUpdated = Number(prior.updatedAt || 0);
+        if (incomingUpdated >= priorUpdated) {
+            byId.set(thread.id, thread);
+        }
+    });
+
+    return [...byId.values()].sort((a, b) => Number(b.updatedAt || 0) - Number(a.updatedAt || 0));
+}
+
 function getChatsHandler(req, res) {
     const store = readChatStore();
     const userKey = getSessionUserKey(req);
@@ -1665,11 +1711,17 @@ function getChatsHandler(req, res) {
 }
 
 function putChatsHandler(req, res) {
-    const threads = sanitizeThreads(req.body?.threads);
-    const activeThreadId = typeof req.body?.activeThreadId === 'string' ? req.body.activeThreadId : null;
+    const incomingThreads = sanitizeThreads(req.body?.threads);
+    const requestedActiveThreadId = typeof req.body?.activeThreadId === 'string' ? req.body.activeThreadId : null;
 
     const store = readChatStore();
     const userKey = getSessionUserKey(req);
+    const currentState = store.users[userKey] || { threads: [], activeThreadId: null };
+    const threads = mergeThreads(currentState.threads, incomingThreads);
+    const threadIds = new Set(threads.map((thread) => thread.id));
+    const activeThreadId = threadIds.has(requestedActiveThreadId)
+        ? requestedActiveThreadId
+        : (threadIds.has(currentState.activeThreadId) ? currentState.activeThreadId : null);
     store.users[userKey] = {
         threads,
         activeThreadId,
@@ -1677,7 +1729,7 @@ function putChatsHandler(req, res) {
     };
     writeChatStore(store);
 
-    return res.json({ ok: true });
+    return res.json({ ok: true, threads, activeThreadId });
 }
 
 // Register both prefixed and unprefixed routes to support different mount styles.

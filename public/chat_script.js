@@ -499,21 +499,34 @@ const callIflowCompletion = async ({ model, messages, temperature = 0.4 }) => {
     return text;
 };
 
-const streamIflowCompletion = async ({ model, messages, temperature = 0.4, onToken, tools, tool_choice }) => {
-    const response = await fetch(IFLOW_PROXY_URL, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-            model,
-            messages,
-            temperature,
-            stream: true,
-            tools,
-            tool_choice
-        })
-    });
+const streamIflowCompletion = async ({ model, messages, temperature = 0.4, onToken, tools, tool_choice, timeoutMs = 45000 }) => {
+    const controller = new AbortController();
+    const timeoutHandle = setTimeout(() => controller.abort(), Math.max(1000, Number(timeoutMs) || 45000));
+    let response = null;
+    try {
+        response = await fetch(IFLOW_PROXY_URL, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            signal: controller.signal,
+            body: JSON.stringify({
+                model,
+                messages,
+                temperature,
+                stream: true,
+                tools,
+                tool_choice
+            })
+        });
+    } catch (error) {
+        clearTimeout(timeoutHandle);
+        if (error?.name === "AbortError") {
+            throw new Error(`Model stream timeout after ${Math.round(timeoutMs / 1000)}s.`);
+        }
+        throw error;
+    }
 
     if (!response.ok) {
+        clearTimeout(timeoutHandle);
         let errText = `${response.status} ${response.statusText}`;
         try {
             const errJson = await response.json();
@@ -524,6 +537,7 @@ const streamIflowCompletion = async ({ model, messages, temperature = 0.4, onTok
 
     const contentType = response.headers.get("content-type") || "";
     if (!contentType.includes("text/event-stream")) {
+        clearTimeout(timeoutHandle);
         let payload = null;
         try {
             payload = await response.json();
@@ -540,46 +554,55 @@ const streamIflowCompletion = async ({ model, messages, temperature = 0.4, onTok
     let fullText = "";
     let toolCalls = [];
 
-    while (!done) {
-        const { value, done: readerDone } = await reader.read();
-        if (value) {
-            buffer += decoder.decode(value, { stream: true });
-            const parts = buffer.split(/\r?\n\r?\n/);
-            buffer = parts.pop();
+    try {
+        while (!done) {
+            const { value, done: readerDone } = await reader.read();
+            if (value) {
+                buffer += decoder.decode(value, { stream: true });
+                const parts = buffer.split(/\r?\n\r?\n/);
+                buffer = parts.pop();
 
-            for (const part of parts) {
-                const line = part.trim();
-                if (!line) continue;
-                const dataStr = line.startsWith("data:") ? line.replace(/^data:\s*/, "") : line;
-                if (dataStr === "[DONE]") {
-                    done = true;
-                    break;
-                }
-
-                const parsed = JSON.parse(dataStr);
-                const statusErr = getApiStatusError(parsed);
-                if (statusErr) throw new Error(statusErr);
-
-                const choice = parsed.choices?.[0];
-                if (!choice) continue;
-                const delta = choice.delta;
-
-                if (delta?.tool_calls) {
-                    const tc = delta.tool_calls[0];
-                    if (!toolCalls[tc.index]) {
-                        toolCalls[tc.index] = { id: "", type: "function", function: { name: "", arguments: "" } };
+                for (const part of parts) {
+                    const line = part.trim();
+                    if (!line) continue;
+                    const dataStr = line.startsWith("data:") ? line.replace(/^data:\s*/, "") : line;
+                    if (dataStr === "[DONE]") {
+                        done = true;
+                        break;
                     }
-                    if (tc.id) toolCalls[tc.index].id += tc.id;
-                    if (tc.function?.name) toolCalls[tc.index].function.name += tc.function.name;
-                    if (tc.function?.arguments) toolCalls[tc.index].function.arguments += tc.function.arguments;
-                }
-                if (delta?.content) {
-                    fullText += delta.content;
-                    if (typeof onToken === "function") onToken(delta.content, fullText);
+
+                    const parsed = JSON.parse(dataStr);
+                    const statusErr = getApiStatusError(parsed);
+                    if (statusErr) throw new Error(statusErr);
+
+                    const choice = parsed.choices?.[0];
+                    if (!choice) continue;
+                    const delta = choice.delta;
+
+                    if (delta?.tool_calls) {
+                        const tc = delta.tool_calls[0];
+                        if (!toolCalls[tc.index]) {
+                            toolCalls[tc.index] = { id: "", type: "function", function: { name: "", arguments: "" } };
+                        }
+                        if (tc.id) toolCalls[tc.index].id += tc.id;
+                        if (tc.function?.name) toolCalls[tc.index].function.name += tc.function.name;
+                        if (tc.function?.arguments) toolCalls[tc.index].function.arguments += tc.function.arguments;
+                    }
+                    if (delta?.content) {
+                        fullText += delta.content;
+                        if (typeof onToken === "function") onToken(delta.content, fullText);
+                    }
                 }
             }
+            if (readerDone) break;
         }
-        if (readerDone) break;
+    } catch (error) {
+        if (error?.name === "AbortError") {
+            throw new Error(`Model stream timeout after ${Math.round(timeoutMs / 1000)}s.`);
+        }
+        throw error;
+    } finally {
+        clearTimeout(timeoutHandle);
     }
 
     if (!fullText.trim() && toolCalls.length === 0) throw new Error("Empty streamed response from model.");
@@ -1749,10 +1772,13 @@ const generateBotResponse = async (incomingMessageDiv, historyContext, options =
             const streamSections = [];
             const debateTranscript = [];
             const priorityQueue = [];
+            const spokeAgents = new Set();
+            let daisySatisfied = !hasImage;
             let synthesisStream = "";
             let ardyEndedTeamChat = false;
             let turnCount = 0;
             const maxTurns = hasImage ? 12 : 9;
+            const daisyIndex = rolePlan.findIndex((r) => r.name === "Daisy");
 
             const baseDebateTools = [
                 {
@@ -1934,6 +1960,9 @@ const generateBotResponse = async (incomingMessageDiv, historyContext, options =
             };
 
             while (!ardyEndedTeamChat && turnCount < maxTurns) {
+                if (hasImage && daisyIndex !== -1 && !daisySatisfied) {
+                    if (!priorityQueue.includes(daisyIndex)) priorityQueue.unshift(daisyIndex);
+                }
                 const plan = rolePlan[nextAgentIndex()];
                 turnCount += 1;
                 const teamPrompt = debateTranscript.length
@@ -1980,13 +2009,17 @@ const generateBotResponse = async (incomingMessageDiv, historyContext, options =
                         let requestedEndDebate = false;
 
                         while (toolRound < 5) {
+                            const maxToolRounds = plan.name === "Daisy" ? 2 : 5;
+                            if (toolRound >= maxToolRounds) break;
                             toolRound += 1;
+                            const timeoutMs = plan.name === "Daisy" ? 22000 : 45000;
                             const streamResult = await streamIflowCompletion({
                                 model: modelCandidate,
                                 messages: liveMessages,
-                                temperature: 0.45,
+                                temperature: plan.name === "Daisy" ? 0.25 : 0.45,
                                 tools: plan.name === "Ardy" ? ardyTools : baseDebateTools,
                                 tool_choice: "auto",
+                                timeoutMs,
                                 onToken: (_, full) => {
                                     section.text = `${aggregateText}${full}`;
                                     renderMultiAgentStreaming(messageElement, streamSections, synthesisStream);
@@ -2099,8 +2132,13 @@ const generateBotResponse = async (incomingMessageDiv, historyContext, options =
                                     toolResultText = formatAgentToolResult(toolName, result);
                                 } else if (toolName === "end_team_debate" && plan.name === "Ardy") {
                                     const reason = String(args.reason || "Team has enough consensus.").trim();
-                                    requestedEndDebate = true;
-                                    toolResultText = `Debate end requested by Ardy: ${reason}`;
+                                    if (hasImage && daisyIndex !== -1 && !daisySatisfied) {
+                                        requestedEndDebate = false;
+                                        toolResultText = `Debate end request deferred: Daisy must report image analysis first. Requested reason: ${reason}`;
+                                    } else {
+                                        requestedEndDebate = true;
+                                        toolResultText = `Debate end requested by Ardy: ${reason}`;
+                                    }
                                 } else {
                                     toolResultText = `Tool ${toolName} executed.`;
                                 }
@@ -2123,6 +2161,8 @@ const generateBotResponse = async (incomingMessageDiv, historyContext, options =
 
                         section.status = "completed";
                         section.text = aggregateText || "(No direct text output)";
+                        spokeAgents.add(plan.name);
+                        if (plan.name === "Daisy") daisySatisfied = true;
                         renderMultiAgentStreaming(messageElement, streamSections, synthesisStream);
                         debateTranscript.push(`${plan.name}: ${section.text}`);
                         agentOutputs.push({ model: modelCandidate, role: plan.role, name: plan.name, text: section.text });
@@ -2144,6 +2184,17 @@ const generateBotResponse = async (incomingMessageDiv, historyContext, options =
                 }
 
                 if (!completed) {
+                    if (plan.name === "Daisy") {
+                        daisySatisfied = true;
+                        debateTranscript.push("Daisy: Vision analysis unavailable within timeout; proceeding without image-specific team notes.");
+                        agentOutputs.push({
+                            model: "vision-fallback",
+                            role: plan.role,
+                            name: plan.name,
+                            text: "Vision analysis unavailable within timeout; proceed with text-only reasoning."
+                        });
+                        updateThinkingStatus(incomingMessageDiv, "Daisy timed out; proceeding with fallback.");
+                    }
                     updateThinkingStatus(incomingMessageDiv, `${plan.name} could not complete a turn.`);
                 }
             }
