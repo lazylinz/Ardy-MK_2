@@ -173,6 +173,29 @@ const stripMarkdownForSpeech = (text) => {
     return container.textContent.replace(/\s+/g, " ").trim();
 };
 
+const setVoiceThinkingIndicator = (messageElement, mode = "dots") => {
+    if (!messageElement) return;
+    if (mode === "waveform") {
+        messageElement.innerHTML = `
+            <div class="thinking-indicator waveform" aria-label="Voice playback in progress">
+                <span class="wave-bar"></span>
+                <span class="wave-bar"></span>
+                <span class="wave-bar"></span>
+                <span class="wave-bar"></span>
+                <span class="wave-bar"></span>
+            </div>
+        `;
+        return;
+    }
+    messageElement.innerHTML = `
+        <div class="thinking-indicator" aria-label="Thinking">
+            <div class="dot"></div>
+            <div class="dot"></div>
+            <div class="dot"></div>
+        </div>
+    `;
+};
+
 const stopArdySpeech = ({ bumpSequence = true } = {}) => {
     if (bumpSequence) ttsRequestSequence += 1;
     if (activeArdyAudio) {
@@ -209,10 +232,11 @@ const releaseArdyAudio = (audio) => {
     }
 };
 
-const playAudioAndWait = (audio, requestId) => {
+const playAudioAndWait = (audio, requestId, onPlaybackStart) => {
     if (!audio) return Promise.resolve(false);
     return new Promise((resolve, reject) => {
         let settled = false;
+        let playbackStarted = false;
         const finish = (ok, error = null) => {
             if (settled) return;
             settled = true;
@@ -224,6 +248,14 @@ const playAudioAndWait = (audio, requestId) => {
             resolve(ok);
         };
 
+        const handlePlaybackStart = () => {
+            if (playbackStarted) return;
+            playbackStarted = true;
+            if (typeof onPlaybackStart === "function") onPlaybackStart();
+        };
+
+        audio.onplaying = handlePlaybackStart;
+        audio.onplay = handlePlaybackStart;
         audio.onended = () => finish(true);
         audio.onerror = () => finish(false, new Error("Audio playback failed."));
 
@@ -238,7 +270,7 @@ const playAudioAndWait = (audio, requestId) => {
     });
 };
 
-const speakAsArdyWithPuter = async (plainText) => {
+const speakAsArdyWithPuter = async (plainText, onPlaybackStart) => {
     if (!plainText || !window.puter?.ai?.txt2speech) return false;
     const requestId = ++ttsRequestSequence;
     const result = await window.puter.ai.txt2speech(plainText, {
@@ -249,10 +281,10 @@ const speakAsArdyWithPuter = async (plainText) => {
     if (requestId !== ttsRequestSequence) return false;
     const audio = buildAudioFromPuterResult(result);
     if (!audio) return false;
-    return playAudioAndWait(audio, requestId);
+    return playAudioAndWait(audio, requestId, onPlaybackStart);
 };
 
-const speakAsArdyFallback = (plainText) => {
+const speakAsArdyFallback = (plainText, onPlaybackStart) => {
     if (!plainText || !("speechSynthesis" in window) || typeof SpeechSynthesisUtterance === "undefined") {
         return Promise.resolve(false);
     }
@@ -269,6 +301,9 @@ const speakAsArdyFallback = (plainText) => {
     utterance.pitch = 0.86;
     utterance.volume = 1;
     return new Promise((resolve, reject) => {
+        utterance.onstart = () => {
+            if (typeof onPlaybackStart === "function") onPlaybackStart();
+        };
         utterance.onend = () => resolve(true);
         utterance.onerror = () => reject(new Error("Fallback speech synthesis failed."));
         if (requestId !== ttsRequestSequence) {
@@ -305,11 +340,15 @@ const renderVoiceReplyAfterThinking = async (incomingMessageDiv, messageElement,
     if (plainText) {
         let didFinishSpeech = false;
         try {
-            didFinishSpeech = await speakAsArdyWithPuter(plainText);
+            didFinishSpeech = await speakAsArdyWithPuter(plainText, () => {
+                setVoiceThinkingIndicator(messageElement, "waveform");
+            });
         } catch (error) {}
         if (!didFinishSpeech) {
             try {
-                await speakAsArdyFallback(plainText);
+                await speakAsArdyFallback(plainText, () => {
+                    setVoiceThinkingIndicator(messageElement, "waveform");
+                });
             } catch (error) {}
         }
     }
