@@ -35,7 +35,6 @@ const MODEL_STORAGE_KEY = "ardy_selected_text_model_v1";
 const MULTI_AGENT_MODE_STORAGE_KEY = "ardy_multi_agent_mode_v1";
 
 const IFLOW_PROXY_URL = "/api/iflow/chat";
-const IMAGE_UPLOAD_API_URL = "/api/image-upload";
 const DEFAULT_MODEL = "glm-4.6";
 const MODEL_VISION = "qwen3-vl-plus";
 const MODEL_OPTIONS = [
@@ -853,32 +852,6 @@ const toImageDataUrl = (fileData) => {
     return `data:${fileData.mime_type};base64,${fileData.data}`;
 };
 
-const ensureHostedImageUrl = async (fileData) => {
-    if (!fileData?.mime_type?.startsWith("image") || !fileData?.data) return "";
-    if (fileData.modelImageUrl) return fileData.modelImageUrl;
-
-    try {
-        const response = await fetch(IMAGE_UPLOAD_API_URL, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-                mimeType: fileData.mime_type,
-                base64Data: fileData.data
-            })
-        });
-        const payload = await response.json().catch(() => null);
-        if (!response.ok) {
-            throw new Error(payload?.error?.message || `${response.status} ${response.statusText}`);
-        }
-        const hostedUrl = String(payload?.url || "").trim();
-        if (!hostedUrl) throw new Error("Image upload returned no URL.");
-        fileData.modelImageUrl = hostedUrl;
-        return hostedUrl;
-    } catch (error) {
-        return toImageDataUrl(fileData);
-    }
-};
-
 const commitAssistantBranch = (historyIndex, text) => {
     if (historyIndex === -1) return;
     const messageText = String(text || "");
@@ -1568,7 +1541,7 @@ const generateBotResponse = async (incomingMessageDiv, historyContext, options =
     for (const entry of historyContext) {
         if (entry.role === "user" && entry.fileData) {
             if (entry.fileData.mime_type?.startsWith("image")) {
-                const imageUrlForModel = await ensureHostedImageUrl(entry.fileData);
+                const imageUrlForModel = toImageDataUrl(entry.fileData);
                 messages.push({
                     role: "user",
                     content: [
@@ -1762,7 +1735,7 @@ const generateBotResponse = async (incomingMessageDiv, historyContext, options =
                 ? {
                     type: "image_url",
                     image_url: {
-                        url: await ensureHostedImageUrl(latestUserEntry.fileData)
+                        url: toImageDataUrl(latestUserEntry.fileData)
                     }
                 }
                 : null;
@@ -2721,21 +2694,50 @@ const optimizeImageDataUrl = async (dataUrl, mimeType) => {
 
     try {
         const img = await loadImage();
-        const maxDimension = 1400;
-        const scale = Math.min(1, maxDimension / Math.max(img.width || 1, img.height || 1));
-        const targetWidth = Math.max(1, Math.round((img.width || 1) * scale));
-        const targetHeight = Math.max(1, Math.round((img.height || 1) * scale));
+        const targetMaxBytes = 780 * 1024;
+        let width = Math.max(1, img.width || 1);
+        let height = Math.max(1, img.height || 1);
+        const maxDimension = 1100;
+        const initialScale = Math.min(1, maxDimension / Math.max(width, height));
+        width = Math.max(1, Math.round(width * initialScale));
+        height = Math.max(1, Math.round(height * initialScale));
 
         const canvas = document.createElement("canvas");
-        canvas.width = targetWidth;
-        canvas.height = targetHeight;
         const ctx = canvas.getContext("2d");
         if (!ctx) throw new Error("Canvas context unavailable.");
-        ctx.drawImage(img, 0, 0, targetWidth, targetHeight);
 
-        const outputMime = safeMime === "image/png" ? "image/png" : "image/jpeg";
-        const quality = outputMime === "image/jpeg" ? 0.84 : undefined;
-        const optimizedDataUrl = canvas.toDataURL(outputMime, quality);
+        const outputMime = safeMime === "image/webp" ? "image/webp" : "image/jpeg";
+        const qualityCandidates = [0.8, 0.68, 0.58, 0.48];
+        let optimizedDataUrl = dataUrl;
+
+        for (let attempt = 0; attempt < 5; attempt += 1) {
+            canvas.width = width;
+            canvas.height = height;
+            ctx.clearRect(0, 0, width, height);
+            ctx.drawImage(img, 0, 0, width, height);
+
+            let bestAttempt = "";
+            for (const quality of qualityCandidates) {
+                const candidate = canvas.toDataURL(outputMime, quality);
+                const b64 = candidate.split(",")[1] || "";
+                const approxBytes = Math.floor(b64.length * 0.75);
+                bestAttempt = candidate;
+                if (approxBytes <= targetMaxBytes) {
+                    optimizedDataUrl = candidate;
+                    const optimizedBase64 = b64;
+                    return {
+                        mimeType: outputMime,
+                        base64Data: optimizedBase64,
+                        previewDataUrl: optimizedDataUrl
+                    };
+                }
+            }
+
+            optimizedDataUrl = bestAttempt || optimizedDataUrl;
+            width = Math.max(420, Math.round(width * 0.82));
+            height = Math.max(420, Math.round(height * 0.82));
+        }
+
         const optimizedBase64 = optimizedDataUrl.split(",")[1] || "";
 
         return {
@@ -2777,7 +2779,6 @@ fileInput.addEventListener("change", () => {
         fileInput.value = "";
         userData.file.mime_type = file.type;
         userData.file.fileName = file.name;
-        userData.file.modelImageUrl = "";
 
         const previewImg = fileUploadWrapper.querySelector("img");
         const previewIcon = fileUploadWrapper.querySelector(".file-icon-preview");
