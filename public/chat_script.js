@@ -65,7 +65,11 @@ let manualVoiceStop = false;
 let finalVoiceTranscript = "";
 let preferredArdyVoice = null;
 let pendingVoiceReplyFromStt = false;
+let activeArdyAudio = null;
+let ttsRequestSequence = 0;
 const initialInputHeight = messageInput.scrollHeight;
+const PUTER_TTS_PROVIDER = "openai";
+const PUTER_TTS_VOICE = "echo";
 
 marked.setOptions({
     highlight: function (code, lang) {
@@ -170,9 +174,59 @@ const stripMarkdownForSpeech = (text) => {
 };
 
 const stopArdySpeech = () => {
+    ttsRequestSequence += 1;
+    if (activeArdyAudio) {
+        activeArdyAudio.pause();
+        activeArdyAudio.currentTime = 0;
+        activeArdyAudio = null;
+    }
     if ("speechSynthesis" in window) {
         window.speechSynthesis.cancel();
     }
+};
+
+const buildAudioFromPuterResult = (result) => {
+    if (!result) return null;
+    if (result instanceof HTMLAudioElement) return result;
+    if (typeof result === "string") return new Audio(result);
+    if (typeof result?.url === "string") return new Audio(result.url);
+    if (result?.blob instanceof Blob) {
+        const objectUrl = URL.createObjectURL(result.blob);
+        const audio = new Audio(objectUrl);
+        audio.dataset.revokeUrl = "true";
+        return audio;
+    }
+    return null;
+};
+
+const releaseArdyAudio = (audio) => {
+    if (!audio) return;
+    if (audio.dataset?.revokeUrl === "true" && audio.src) {
+        URL.revokeObjectURL(audio.src);
+    }
+    if (activeArdyAudio === audio) {
+        activeArdyAudio = null;
+    }
+};
+
+const speakAsArdyWithPuter = async (plainText) => {
+    if (!plainText || !window.puter?.ai?.txt2speech) return false;
+    const requestId = ++ttsRequestSequence;
+    const result = await window.puter.ai.txt2speech(plainText, {
+        provider: PUTER_TTS_PROVIDER,
+        voice: PUTER_TTS_VOICE
+    });
+
+    if (requestId !== ttsRequestSequence) return true;
+    const audio = buildAudioFromPuterResult(result);
+    if (!audio) return false;
+
+    stopArdySpeech();
+    activeArdyAudio = audio;
+    audio.onended = () => releaseArdyAudio(audio);
+    audio.onerror = () => releaseArdyAudio(audio);
+    await audio.play();
+    return true;
 };
 
 const speakAsArdyFallback = (plainText) => {
@@ -197,9 +251,12 @@ const renderVoiceReplyAfterThinking = async (incomingMessageDiv, messageElement,
     messageElement.innerHTML = marked.parse(markdownText);
     if (plainText) {
         try {
-            speakAsArdyFallback(plainText);
+            const didPlayFromPuter = await speakAsArdyWithPuter(plainText);
+            if (!didPlayFromPuter) {
+                speakAsArdyFallback(plainText);
+            }
         } catch (error) {
-            // Ignore speech engine failures and keep rendered text reply.
+            speakAsArdyFallback(plainText);
         }
     }
 };
