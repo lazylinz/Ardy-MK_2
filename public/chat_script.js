@@ -173,8 +173,8 @@ const stripMarkdownForSpeech = (text) => {
     return container.textContent.replace(/\s+/g, " ").trim();
 };
 
-const stopArdySpeech = () => {
-    ttsRequestSequence += 1;
+const stopArdySpeech = ({ bumpSequence = true } = {}) => {
+    if (bumpSequence) ttsRequestSequence += 1;
     if (activeArdyAudio) {
         activeArdyAudio.pause();
         activeArdyAudio.currentTime = 0;
@@ -209,6 +209,35 @@ const releaseArdyAudio = (audio) => {
     }
 };
 
+const playAudioAndWait = (audio, requestId) => {
+    if (!audio) return Promise.resolve(false);
+    return new Promise((resolve, reject) => {
+        let settled = false;
+        const finish = (ok, error = null) => {
+            if (settled) return;
+            settled = true;
+            releaseArdyAudio(audio);
+            if (error) {
+                reject(error);
+                return;
+            }
+            resolve(ok);
+        };
+
+        audio.onended = () => finish(true);
+        audio.onerror = () => finish(false, new Error("Audio playback failed."));
+
+        if (requestId !== ttsRequestSequence) {
+            finish(false);
+            return;
+        }
+
+        stopArdySpeech({ bumpSequence: false });
+        activeArdyAudio = audio;
+        audio.play().catch((err) => finish(false, err));
+    });
+};
+
 const speakAsArdyWithPuter = async (plainText) => {
     if (!plainText || !window.puter?.ai?.txt2speech) return false;
     const requestId = ++ttsRequestSequence;
@@ -217,20 +246,17 @@ const speakAsArdyWithPuter = async (plainText) => {
         voice: PUTER_TTS_VOICE
     });
 
-    if (requestId !== ttsRequestSequence) return true;
+    if (requestId !== ttsRequestSequence) return false;
     const audio = buildAudioFromPuterResult(result);
     if (!audio) return false;
-
-    stopArdySpeech();
-    activeArdyAudio = audio;
-    audio.onended = () => releaseArdyAudio(audio);
-    audio.onerror = () => releaseArdyAudio(audio);
-    await audio.play();
-    return true;
+    return playAudioAndWait(audio, requestId);
 };
 
 const speakAsArdyFallback = (plainText) => {
-    if (!plainText || !("speechSynthesis" in window) || typeof SpeechSynthesisUtterance === "undefined") return;
+    if (!plainText || !("speechSynthesis" in window) || typeof SpeechSynthesisUtterance === "undefined") {
+        return Promise.resolve(false);
+    }
+    const requestId = ++ttsRequestSequence;
     preferredArdyVoice = preferredArdyVoice || pickPreferredArdyVoice();
     const utterance = new SpeechSynthesisUtterance(plainText);
     if (preferredArdyVoice) {
@@ -242,23 +268,52 @@ const speakAsArdyFallback = (plainText) => {
     utterance.rate = 0.96;
     utterance.pitch = 0.86;
     utterance.volume = 1;
-    window.speechSynthesis.cancel();
-    window.speechSynthesis.speak(utterance);
+    return new Promise((resolve, reject) => {
+        utterance.onend = () => resolve(true);
+        utterance.onerror = () => reject(new Error("Fallback speech synthesis failed."));
+        if (requestId !== ttsRequestSequence) {
+            resolve(false);
+            return;
+        }
+        stopArdySpeech({ bumpSequence: false });
+        window.speechSynthesis.speak(utterance);
+    });
+};
+
+const fakeStreamAssistantMarkdown = async (messageElement, markdownText) => {
+    const source = String(markdownText || "");
+    if (!source) {
+        messageElement.innerHTML = "";
+        return;
+    }
+
+    const step = source.length > 2400 ? 28 : source.length > 1200 ? 20 : 12;
+    const delayMs = 16;
+
+    for (let i = step; i < source.length; i += step) {
+        messageElement.innerHTML = marked.parse(source.slice(0, i));
+        chatBody.scrollTo({ top: chatBody.scrollHeight, behavior: "smooth" });
+        // Keep a consistent fake-stream cadence.
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+    messageElement.innerHTML = marked.parse(source);
+    chatBody.scrollTo({ top: chatBody.scrollHeight, behavior: "smooth" });
 };
 
 const renderVoiceReplyAfterThinking = async (incomingMessageDiv, messageElement, markdownText) => {
     const plainText = stripMarkdownForSpeech(markdownText).slice(0, 1400);
-    messageElement.innerHTML = marked.parse(markdownText);
     if (plainText) {
+        let didFinishSpeech = false;
         try {
-            const didPlayFromPuter = await speakAsArdyWithPuter(plainText);
-            if (!didPlayFromPuter) {
-                speakAsArdyFallback(plainText);
-            }
-        } catch (error) {
-            speakAsArdyFallback(plainText);
+            didFinishSpeech = await speakAsArdyWithPuter(plainText);
+        } catch (error) {}
+        if (!didFinishSpeech) {
+            try {
+                await speakAsArdyFallback(plainText);
+            } catch (error) {}
         }
     }
+    await fakeStreamAssistantMarkdown(messageElement, markdownText);
 };
 
 const submitMessageFromInput = ({ fromVoiceInput = false } = {}) => {
