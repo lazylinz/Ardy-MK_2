@@ -64,7 +64,11 @@ const AUTH_COOKIE_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
 const QUICK_SIGNIN_TTL_MS = 5 * 60 * 1000;
 const PASSWORD_GATE_TTL_MS = 10 * 60 * 1000;
 const FACE_MATCH_THRESHOLD = Number(process.env.FACE_MATCH_THRESHOLD || 0.47);
+const HOSTED_IMAGE_TTL_MS = 15 * 60 * 1000;
+const HOSTED_IMAGE_MAX_BYTES = 6 * 1024 * 1024;
+const HOSTED_IMAGE_MAX_ITEMS = 300;
 const quickSigninTokens = new Map();
+const hostedImages = new Map();
 const MACRO_FIRING_WINDOW_MS = 5000;
 const MACRO_TICK_INTERVAL_MS = 1000;
 const macroIdleTimers = new Map();
@@ -445,8 +449,8 @@ async function visitSite(url, locale) {
 
 // Middleware ----------------------------------------------------------------
 app.use(cors()); // Enable CORS for all routes
-app.use(express.json()); // Parse JSON bodies
-app.use(express.urlencoded({ extended: true })); // Parse form bodies (for login)
+app.use(express.json({ limit: '20mb' })); // Parse JSON bodies
+app.use(express.urlencoded({ extended: true, limit: '20mb' })); // Parse form bodies (for login)
 app.use(
   session({
     secret: SESSION_SECRET,
@@ -928,6 +932,75 @@ app.post('/api/voice/ardy', requireWhitelistedIp, requireAuth, async (req, res) 
             message: 'Voice synthesis is temporarily disabled in this deployment.'
         }
     });
+});
+
+function pruneHostedImages() {
+    const now = Date.now();
+    for (const [id, item] of hostedImages.entries()) {
+        if (!item || !item.expiresAt || item.expiresAt <= now) {
+            hostedImages.delete(id);
+        }
+    }
+    if (hostedImages.size <= HOSTED_IMAGE_MAX_ITEMS) return;
+    const ordered = [...hostedImages.entries()].sort((a, b) => (a[1]?.createdAt || 0) - (b[1]?.createdAt || 0));
+    const overflow = hostedImages.size - HOSTED_IMAGE_MAX_ITEMS;
+    for (let i = 0; i < overflow; i += 1) {
+        hostedImages.delete(ordered[i][0]);
+    }
+}
+
+app.post('/api/image-upload', requireWhitelistedIp, requireAuth, (req, res) => {
+    pruneHostedImages();
+    const mimeType = String(req.body?.mimeType || '').trim().toLowerCase();
+    const base64Data = String(req.body?.base64Data || '').trim();
+    if (!mimeType.startsWith('image/')) {
+        return res.status(400).json({ error: { message: 'mimeType must be an image/* type.' } });
+    }
+    if (!base64Data) {
+        return res.status(400).json({ error: { message: 'base64Data is required.' } });
+    }
+
+    let buffer = null;
+    try {
+        buffer = Buffer.from(base64Data, 'base64');
+    } catch (error) {
+        return res.status(400).json({ error: { message: 'Invalid base64 image payload.' } });
+    }
+    if (!buffer || buffer.length === 0) {
+        return res.status(400).json({ error: { message: 'Decoded image payload is empty.' } });
+    }
+    if (buffer.length > HOSTED_IMAGE_MAX_BYTES) {
+        return res.status(413).json({ error: { message: `Image too large. Max ${HOSTED_IMAGE_MAX_BYTES} bytes.` } });
+    }
+
+    const now = Date.now();
+    const id = `img_${crypto.randomBytes(18).toString('hex')}`;
+    hostedImages.set(id, {
+        createdAt: now,
+        expiresAt: now + HOSTED_IMAGE_TTL_MS,
+        mimeType,
+        buffer
+    });
+
+    const origin = getRequestOrigin(req);
+    return res.json({
+        ok: true,
+        id,
+        url: `${origin}/public-image/${id}`,
+        expiresAt: new Date(now + HOSTED_IMAGE_TTL_MS).toISOString()
+    });
+});
+
+app.get('/public-image/:id', (req, res) => {
+    pruneHostedImages();
+    const id = String(req.params?.id || '').trim();
+    const entry = hostedImages.get(id);
+    if (!entry) {
+        return res.status(404).send('Image not found or expired.');
+    }
+    res.setHeader('Content-Type', entry.mimeType || 'application/octet-stream');
+    res.setHeader('Cache-Control', 'public, max-age=300');
+    return res.send(entry.buffer);
 });
 
 app.post('/api/web-search', requireWhitelistedIp, requireAuth, async (req, res) => {

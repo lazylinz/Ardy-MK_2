@@ -35,6 +35,7 @@ const MODEL_STORAGE_KEY = "ardy_selected_text_model_v1";
 const MULTI_AGENT_MODE_STORAGE_KEY = "ardy_multi_agent_mode_v1";
 
 const IFLOW_PROXY_URL = "/api/iflow/chat";
+const IMAGE_UPLOAD_API_URL = "/api/image-upload";
 const DEFAULT_MODEL = "glm-4.6";
 const MODEL_VISION = "qwen3-vl-plus";
 const MODEL_OPTIONS = [
@@ -824,6 +825,53 @@ const escapeText = (value) => String(value || "")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;");
 
+const toImageDataUrl = (fileData) => {
+    if (!fileData?.mime_type?.startsWith("image") || !fileData?.data) return "";
+    return `data:${fileData.mime_type};base64,${fileData.data}`;
+};
+
+const ensureHostedImageUrl = async (fileData) => {
+    if (!fileData?.mime_type?.startsWith("image") || !fileData?.data) return "";
+    if (fileData.modelImageUrl) return fileData.modelImageUrl;
+
+    try {
+        const response = await fetch(IMAGE_UPLOAD_API_URL, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                mimeType: fileData.mime_type,
+                base64Data: fileData.data
+            })
+        });
+        const payload = await response.json().catch(() => null);
+        if (!response.ok) {
+            throw new Error(payload?.error?.message || `${response.status} ${response.statusText}`);
+        }
+        const hostedUrl = String(payload?.url || "").trim();
+        if (!hostedUrl) throw new Error("Image upload returned no URL.");
+        fileData.modelImageUrl = hostedUrl;
+        return hostedUrl;
+    } catch (error) {
+        return toImageDataUrl(fileData);
+    }
+};
+
+const commitAssistantBranch = (historyIndex, text) => {
+    if (historyIndex === -1) return;
+    const messageText = String(text || "");
+    if (!messageText) return;
+
+    const entry = chatHistory[historyIndex];
+    if (!entry) return;
+    const branches = Array.isArray(entry.branches) ? [...entry.branches] : [];
+    if (branches.length === 0 || branches[branches.length - 1] !== messageText) {
+        branches.push(messageText);
+    }
+    entry.parts = [{ text: messageText }];
+    entry.branches = branches;
+    entry.currentBranch = Math.max(0, branches.length - 1);
+};
+
 const saveMacro = async ({ name, triggerLua, thenLuaScript, elseLuaScript = "", enabled = true }) => {
     const response = await fetch(MACROS_API_URL, {
         method: "POST",
@@ -984,7 +1032,15 @@ const persistCurrentThread = () => {
 const ensureAssistantHistoryEntry = (msgDiv) => {
     const id = parseInt(msgDiv.dataset.id, 10);
     let idx = chatHistory.findIndex((h) => h.id === id);
-    if (idx !== -1) return idx;
+    if (idx !== -1) {
+        const existing = chatHistory[idx];
+        if (!Array.isArray(existing.branches)) {
+            const currentText = existing?.parts?.[0]?.text || "";
+            existing.branches = currentText ? [currentText] : [];
+            existing.currentBranch = 0;
+        }
+        return idx;
+    }
 
     chatHistory.push({
         role: "assistant",
@@ -1486,14 +1542,15 @@ const generateBotResponse = async (incomingMessageDiv, historyContext, options =
     const messages = [];
     let skipDefaultFinalize = false;
 
-    historyContext.forEach((entry) => {
+    for (const entry of historyContext) {
         if (entry.role === "user" && entry.fileData) {
             if (entry.fileData.mime_type?.startsWith("image")) {
+                const imageUrlForModel = await ensureHostedImageUrl(entry.fileData);
                 messages.push({
                     role: "user",
                     content: [
                         { type: "text", text: entry.parts[0].text },
-                        { type: "image_url", image_url: { url: `data:${entry.fileData.mime_type};base64,${entry.fileData.data}` } }
+                        { type: "image_url", image_url: { url: imageUrlForModel } }
                     ]
                 });
             } else {
@@ -1505,12 +1562,12 @@ const generateBotResponse = async (incomingMessageDiv, historyContext, options =
                 }
                 messages.push({ role: "user", content: entry.parts[0].text + fileContent });
             }
-            return;
+            continue;
         }
 
         const content = (entry.parts || []).map((p) => p.text).join("\n");
         if (content) messages.push({ role: entry.role, content });
-    });
+    }
 
     const latestUserEntry = [...historyContext].reverse().find((entry) => entry.role === "user") || null;
     const hasImage = Boolean(
@@ -1682,7 +1739,7 @@ const generateBotResponse = async (incomingMessageDiv, historyContext, options =
                 ? {
                     type: "image_url",
                     image_url: {
-                        url: `data:${latestUserEntry.fileData.mime_type};base64,${latestUserEntry.fileData.data}`
+                        url: await ensureHostedImageUrl(latestUserEntry.fileData)
                     }
                 }
                 : null;
@@ -2145,9 +2202,7 @@ Then output markdown sections: Team Notes, Final Answer.`
             messageElement.innerHTML = marked.parse(synthesisText);
             const historyIndex = ensureAssistantHistoryEntry(incomingMessageDiv);
             if (historyIndex !== -1) {
-                chatHistory[historyIndex].parts = [{ text: synthesisText }];
-                chatHistory[historyIndex].branches = [synthesisText];
-                chatHistory[historyIndex].currentBranch = 0;
+                commitAssistantBranch(historyIndex, synthesisText);
             }
             persistCurrentThread();
             if (shouldVoiceReply) {
@@ -2359,11 +2414,7 @@ Then output markdown sections: Team Notes, Final Answer.`
 
         if (fullText) {
             const historyIndex = ensureAssistantHistoryEntry(incomingMessageDiv);
-            if (historyIndex !== -1) {
-                chatHistory[historyIndex].parts = [{ text: fullText }];
-                chatHistory[historyIndex].branches = [fullText];
-                chatHistory[historyIndex].currentBranch = 0;
-            }
+            commitAssistantBranch(historyIndex, fullText);
             persistCurrentThread();
             if (shouldVoiceReply) {
                 skipDefaultFinalize = true;
@@ -2377,9 +2428,7 @@ Then output markdown sections: Team Notes, Final Answer.`
         const historyIndex = ensureAssistantHistoryEntry(incomingMessageDiv);
         if (historyIndex !== -1) {
             const errorText = `Error: ${error.message}`;
-            chatHistory[historyIndex].parts = [{ text: errorText }];
-            chatHistory[historyIndex].branches = [errorText];
-            chatHistory[historyIndex].currentBranch = 0;
+            commitAssistantBranch(historyIndex, errorText);
             persistCurrentThread();
         }
     } finally {
@@ -2477,10 +2526,6 @@ const regenerateMessage = async (botMsgDiv) => {
     const oldThinkBox = botMsgDiv.querySelector(".thinking-box");
     if (oldThinkBox) oldThinkBox.remove();
     botMsgDiv.classList.add("thinking");
-
-    chatHistory[historyIndex].branches = [];
-    chatHistory[historyIndex].currentBranch = 0;
-    persistCurrentThread();
 
     await generateBotResponse(botMsgDiv, contextHistory);
 };
@@ -2614,6 +2659,48 @@ const addMessageActions = (messageDiv, role) => {
     messageDiv.appendChild(actionsDiv);
 };
 
+const optimizeImageDataUrl = async (dataUrl, mimeType) => {
+    const safeMime = String(mimeType || "").toLowerCase().startsWith("image/") ? mimeType : "image/jpeg";
+    const loadImage = () => new Promise((resolve, reject) => {
+        const img = new Image();
+        img.onload = () => resolve(img);
+        img.onerror = () => reject(new Error("Image decode failed."));
+        img.src = dataUrl;
+    });
+
+    try {
+        const img = await loadImage();
+        const maxDimension = 1400;
+        const scale = Math.min(1, maxDimension / Math.max(img.width || 1, img.height || 1));
+        const targetWidth = Math.max(1, Math.round((img.width || 1) * scale));
+        const targetHeight = Math.max(1, Math.round((img.height || 1) * scale));
+
+        const canvas = document.createElement("canvas");
+        canvas.width = targetWidth;
+        canvas.height = targetHeight;
+        const ctx = canvas.getContext("2d");
+        if (!ctx) throw new Error("Canvas context unavailable.");
+        ctx.drawImage(img, 0, 0, targetWidth, targetHeight);
+
+        const outputMime = safeMime === "image/png" ? "image/png" : "image/jpeg";
+        const quality = outputMime === "image/jpeg" ? 0.84 : undefined;
+        const optimizedDataUrl = canvas.toDataURL(outputMime, quality);
+        const optimizedBase64 = optimizedDataUrl.split(",")[1] || "";
+
+        return {
+            mimeType: outputMime,
+            base64Data: optimizedBase64,
+            previewDataUrl: optimizedDataUrl
+        };
+    } catch (error) {
+        return {
+            mimeType: safeMime,
+            base64Data: dataUrl.split(",")[1] || "",
+            previewDataUrl: dataUrl
+        };
+    }
+};
+
 messageInput.addEventListener("input", () => {
     messageInput.style.height = `${initialInputHeight}px`;
     messageInput.style.height = `${messageInput.scrollHeight}px`;
@@ -2635,17 +2722,20 @@ fileInput.addEventListener("change", () => {
         file.name.match(/\.(js|jsx|ts|tsx|py|java|c|cpp|h|css|html|json|md|txt|log|sh|bat|xml|yaml|yml)$/i);
 
     const reader = new FileReader();
-    reader.onload = (e) => {
+    reader.onload = async (e) => {
         fileInput.value = "";
         userData.file.mime_type = file.type;
         userData.file.fileName = file.name;
+        userData.file.modelImageUrl = "";
 
         const previewImg = fileUploadWrapper.querySelector("img");
         const previewIcon = fileUploadWrapper.querySelector(".file-icon-preview");
 
         if (file.type.startsWith("image/")) {
-            userData.file.data = e.target.result.split(",")[1];
-            previewImg.src = e.target.result;
+            const optimized = await optimizeImageDataUrl(e.target.result, file.type);
+            userData.file.mime_type = optimized.mimeType;
+            userData.file.data = optimized.base64Data;
+            previewImg.src = optimized.previewDataUrl;
             previewImg.style.display = "block";
             previewIcon.style.display = "none";
         } else {
