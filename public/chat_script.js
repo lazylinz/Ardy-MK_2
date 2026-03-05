@@ -551,6 +551,7 @@ const streamIflowCompletion = async ({ model, messages, temperature = 0.4, onTok
     let done = false;
     let buffer = "";
     let fullText = "";
+    let rawContentText = "";
     let toolCalls = [];
 
     try {
@@ -588,8 +589,11 @@ const streamIflowCompletion = async ({ model, messages, temperature = 0.4, onTok
                         if (tc.function?.arguments) toolCalls[tc.index].function.arguments += tc.function.arguments;
                     }
                     if (delta?.content) {
-                        fullText += delta.content;
-                        if (typeof onToken === "function") onToken(delta.content, fullText);
+                        rawContentText += delta.content;
+                        const visible = splitThinkTaggedContent(rawContentText).answer;
+                        const nextToken = visible.slice(fullText.length);
+                        fullText = visible;
+                        if (typeof onToken === "function" && nextToken) onToken(nextToken, fullText);
                     }
                 }
             }
@@ -669,6 +673,38 @@ const getCurrentReasoningLine = (reasoningText) => {
         if (lines[i]) return lines[i];
     }
     return "";
+};
+
+const splitThinkTaggedContent = (rawText) => {
+    const source = String(rawText || "");
+    const lower = source.toLowerCase();
+    const thinkOpen = "<think>";
+    const thinkClose = "</think>";
+    const reasoningParts = [];
+    const answerParts = [];
+    let cursor = 0;
+
+    while (cursor < source.length) {
+        const start = lower.indexOf(thinkOpen, cursor);
+        if (start === -1) {
+            answerParts.push(source.slice(cursor));
+            break;
+        }
+        answerParts.push(source.slice(cursor, start));
+        const thinkStart = start + thinkOpen.length;
+        const end = lower.indexOf(thinkClose, thinkStart);
+        if (end === -1) {
+            reasoningParts.push(source.slice(thinkStart));
+            break;
+        }
+        reasoningParts.push(source.slice(thinkStart, end));
+        cursor = end + thinkClose.length;
+    }
+
+    return {
+        reasoning: reasoningParts.join("\n").trim(),
+        answer: answerParts.join("").replace(/<\/?think>/gi, "").trim()
+    };
 };
 
 const syncCurrentSystemPromptModel = () => {
@@ -2264,7 +2300,9 @@ Then output markdown sections: Team Notes, Final Answer.`
         let buffer = "";
 
         let fullText = "";
+        let rawContentText = "";
         let reasoningText = "";
+        let sawReasoningContentField = false;
         let toolCalls = [];
         let finishReason = null;
         let thinkingDivCreated = false;
@@ -2311,6 +2349,7 @@ Then output markdown sections: Team Notes, Final Answer.`
                         }
 
                         if (delta?.reasoning_content) {
+                            sawReasoningContentField = true;
                             reasoningText += delta.reasoning_content;
                             if (!thinkingDivCreated) {
                                 const thinkBox = document.createElement("div");
@@ -2339,7 +2378,37 @@ Then output markdown sections: Team Notes, Final Answer.`
                         }
 
                         if (delta?.content) {
-                            fullText += delta.content;
+                            rawContentText += delta.content;
+                            const extracted = splitThinkTaggedContent(rawContentText);
+                            fullText = extracted.answer;
+
+                            if (!sawReasoningContentField && extracted.reasoning) {
+                                reasoningText = extracted.reasoning;
+                                if (!thinkingDivCreated) {
+                                    const thinkBox = document.createElement("div");
+                                    thinkBox.className = "thinking-box thinking-active";
+                                    thinkBox.innerHTML = `
+                                        <div class="thinking-box-header">
+                                            <span>Thinking Process</span>
+                                            <span class="thinking-live-line"></span>
+                                            <span class="material-symbols-outlined toggle-icon">expand_more</span>
+                                        </div>
+                                        <div class="thinking-box-content"></div>
+                                    `;
+                                    messageElement.parentElement.insertBefore(thinkBox, messageElement);
+                                    thinkingBoxDiv = thinkBox;
+                                    thinkingContentDiv = thinkBox.querySelector(".thinking-box-content");
+                                    thinkingLiveLineDiv = thinkBox.querySelector(".thinking-live-line");
+                                    thinkBox.querySelector(".thinking-box-header").addEventListener("click", () => thinkBox.classList.toggle("open"));
+                                    thinkingDivCreated = true;
+                                }
+                                if (thinkingContentDiv) thinkingContentDiv.innerText = reasoningText;
+                                if (thinkingLiveLineDiv) {
+                                    const currentLine = getCurrentReasoningLine(reasoningText);
+                                    thinkingLiveLineDiv.textContent = currentLine || "Thinking...";
+                                }
+                            }
+
                             if (!shouldVoiceReply) {
                                 messageElement.innerHTML = marked.parse(fullText);
                                 chatBody.scrollTo({ top: chatBody.scrollHeight, behavior: "smooth" });
