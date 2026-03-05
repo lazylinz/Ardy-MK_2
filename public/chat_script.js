@@ -35,10 +35,10 @@ const MODEL_STORAGE_KEY = "ardy_selected_text_model_v1";
 const MULTI_AGENT_MODE_STORAGE_KEY = "ardy_multi_agent_mode_v1";
 
 const IFLOW_PROXY_URL = "/api/iflow/chat";
-const DEFAULT_MODEL = "deepseek-r1";
+const DEFAULT_MODEL = "qwen3-235b-a22b-thinking-2507";
 const MODEL_VISION = "qwen3-vl-plus";
 const MODEL_OPTIONS = [
-    { id: "deepseek-r1", label: "DeepSeek R1" },
+    { id: "qwen3-235b-a22b-thinking-2507", label: "Qwen3 235B A22B Thinking 2507" },
     { id: "iflow-rome-30ba3b", label: "iFlow ROME" },
     { id: "qwen3-coder-plus", label: "Qwen3 Coder Plus" },
     { id: "kimi-k2", label: "Kimi K2" },
@@ -1698,8 +1698,8 @@ const generateBotResponse = async (incomingMessageDiv, historyContext, options =
 
     try {
         if (multiAgentMode) {
-            const textModelPool = ["deepseek-r1", "iflow-rome-30ba3b", "qwen3-coder-plus", "kimi-k2"];
-            const secondaryIflowModel = selectedTextModel === "iflow-rome-30ba3b" ? "deepseek-r1" : "iflow-rome-30ba3b";
+            const textModelPool = ["qwen3-235b-a22b-thinking-2507", "iflow-rome-30ba3b", "qwen3-coder-plus", "kimi-k2"];
+            const secondaryIflowModel = selectedTextModel === "iflow-rome-30ba3b" ? "qwen3-235b-a22b-thinking-2507" : "iflow-rome-30ba3b";
             const reviewerModel = selectedTextModel === "qwen3-coder-plus" ? "kimi-k2" : "qwen3-coder-plus";
             const rolePlan = [
                 {

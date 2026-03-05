@@ -909,7 +909,7 @@ app.post('/api/iflow/chat', requireWhitelistedIp, requireAuth, async (req, res) 
 
     try {
         const payload = {
-            model: req.body?.model || 'deepseek-r1',
+            model: req.body?.model || 'qwen3-235b-a22b-thinking-2507',
             messages: Array.isArray(req.body?.messages) ? req.body.messages : [],
             temperature: typeof req.body?.temperature === 'number' ? req.body.temperature : 0.4,
             stream: Boolean(req.body?.stream),
