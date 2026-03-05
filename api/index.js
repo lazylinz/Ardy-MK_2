@@ -718,6 +718,21 @@ function hasRecentPasswordVerification(req) {
     return Number.isFinite(verifiedAt) && verifiedAt > 0 && Date.now() - verifiedAt <= PASSWORD_GATE_TTL_MS;
 }
 
+function isLocalOrHttpRequest(req) {
+    const forwardedProto = String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim().toLowerCase();
+    const proto = forwardedProto || (req.secure ? 'https' : 'http');
+    const hostHeader = String(req.headers['x-forwarded-host'] || req.headers.host || '').split(',')[0].trim();
+    const hostNoPort = hostHeader.replace(/:\d+$/, '').trim().toLowerCase();
+
+    const isHttp = proto === 'http';
+    const isLocalHost = hostNoPort === 'localhost' || hostNoPort === '127.0.0.1' || hostNoPort === '::1' || hostNoPort === '[::1]' || hostNoPort.endsWith('.local');
+    const isPrivateIpv4 = /^10\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(hostNoPort)
+        || /^192\.168\.\d{1,3}\.\d{1,3}$/.test(hostNoPort)
+        || /^172\.(1[6-9]|2\d|3[0-1])\.\d{1,3}\.\d{1,3}$/.test(hostNoPort);
+
+    return isHttp || isLocalHost || isPrivateIpv4;
+}
+
 function findBestFaceMatch(inputDescriptor) {
     const descriptor = sanitizeFaceDescriptor(inputDescriptor);
     if (!descriptor) return null;
@@ -757,6 +772,10 @@ app.post('/login/password', (req, res) => {
         return res.status(401).json({ success: false, message: 'Invalid password' });
     }
     if (req.session) req.session.passwordVerifiedAt = Date.now();
+    if (isLocalOrHttpRequest(req)) {
+        establishAuthenticatedRequest(req, res, getSessionUserKey(req));
+        return res.json({ success: true, requiresFaceScan: false, bypassedFaceScan: true });
+    }
     return res.json({ success: true, requiresFaceScan: true });
 });
 
@@ -766,6 +785,10 @@ app.post('/login', (req, res) => {
         return res.status(401).json({ success: false, message: 'Invalid password' });
     }
     if (req.session) req.session.passwordVerifiedAt = Date.now();
+    if (isLocalOrHttpRequest(req)) {
+        establishAuthenticatedRequest(req, res, getSessionUserKey(req));
+        return res.json({ success: true, requiresFaceScan: false, bypassedFaceScan: true });
+    }
     return res.json({ success: true, requiresFaceScan: true });
 });
 

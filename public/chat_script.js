@@ -553,6 +553,7 @@ const streamIflowCompletion = async ({ model, messages, temperature = 0.4, onTok
     let fullText = "";
     let rawContentText = "";
     let toolCalls = [];
+    const assumeLeadingThoughtUntilClose = shouldAssumeLeadingThought(model);
 
     try {
         while (!done) {
@@ -590,7 +591,7 @@ const streamIflowCompletion = async ({ model, messages, temperature = 0.4, onTok
                     }
                     if (delta?.content) {
                         rawContentText += delta.content;
-                        const visible = splitThinkTaggedContent(rawContentText).answer;
+                        const visible = splitThinkTaggedContent(rawContentText, { assumeLeadingThoughtUntilClose }).answer;
                         const nextToken = visible.slice(fullText.length);
                         fullText = visible;
                         if (typeof onToken === "function" && nextToken) onToken(nextToken, fullText);
@@ -675,11 +676,33 @@ const getCurrentReasoningLine = (reasoningText) => {
     return "";
 };
 
-const splitThinkTaggedContent = (rawText) => {
+const shouldAssumeLeadingThought = (modelId) =>
+    String(modelId || "").toLowerCase() === "qwen3-235b-a22b-thinking-2507";
+
+const splitThinkTaggedContent = (rawText, options = {}) => {
     const source = String(rawText || "");
     const lower = source.toLowerCase();
     const thinkOpen = "<think>";
     const thinkClose = "</think>";
+    const firstOpen = lower.indexOf(thinkOpen);
+    const firstClose = lower.indexOf(thinkClose);
+    const assumeLeadingThoughtUntilClose = Boolean(options.assumeLeadingThoughtUntilClose);
+
+    if (assumeLeadingThoughtUntilClose && firstClose === -1) {
+        return {
+            reasoning: source.trim(),
+            answer: ""
+        };
+    }
+
+    // Support Qwen-style stream where reasoning comes first and only `</think>` appears.
+    if (firstOpen === -1 && firstClose !== -1) {
+        return {
+            reasoning: source.slice(0, firstClose).trim(),
+            answer: source.slice(firstClose + thinkClose.length).replace(/<\/?think>/gi, "").trim()
+        };
+    }
+
     const reasoningParts = [];
     const answerParts = [];
     let cursor = 0;
@@ -2379,7 +2402,9 @@ Then output markdown sections: Team Notes, Final Answer.`
 
                         if (delta?.content) {
                             rawContentText += delta.content;
-                            const extracted = splitThinkTaggedContent(rawContentText);
+                            const extracted = splitThinkTaggedContent(rawContentText, {
+                                assumeLeadingThoughtUntilClose: shouldAssumeLeadingThought(selectedModel)
+                            });
                             fullText = extracted.answer;
 
                             if (!sawReasoningContentField && extracted.reasoning) {

@@ -253,9 +253,14 @@ loginForm.addEventListener('submit', async (e) => {
       body: new URLSearchParams({ password: pwd })
     });
 
+    const payload = await res.json().catch(() => ({}));
     if (!res.ok) {
-      const payload = await res.json().catch(() => ({}));
       throw new Error(payload.message || 'Password verification failed.');
+    }
+
+    if (payload.requiresFaceScan === false) {
+      redirectToChat();
+      return;
     }
 
     state.afterPasswordGate = true;
