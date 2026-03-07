@@ -39,9 +39,11 @@ const DEFAULT_MODEL = "qwen3-235b-a22b-thinking-2507";
 const MODEL_VISION = "qwen3-vl-plus";
 const MODEL_OPTIONS = [
     { id: "qwen3-235b-a22b-thinking-2507", label: "Qwen3 235B A22B Thinking 2507" },
-    { id: "iflow-rome-30ba3b", label: "iFlow ROME" },
-    { id: "qwen3-coder-plus", label: "Qwen3 Coder Plus" },
-    { id: "kimi-k2", label: "Kimi K2" },
+    { id: "qwen3-max", label: "Qwen3 Max" },
+    { id: "qwen3-max-preview", label: "Qwen3 Max Preview" },
+    { id: "kimi-k2-0905", label: "Kimi K2 0905" },
+    { id: "qwen3-32b", label: "Qwen3 32B" },
+    { id: "qwen3-235b-a22b-instruct", label: "Qwen3 235B A22B Instruct" },
     { id: "qwen3-vl-plus", label: "Qwen3 VL Plus (Vision)" }
 ];
 
@@ -1757,38 +1759,47 @@ const generateBotResponse = async (incomingMessageDiv, historyContext, options =
 
     try {
         if (multiAgentMode) {
-            const textModelPool = ["qwen3-235b-a22b-thinking-2507", "iflow-rome-30ba3b", "qwen3-coder-plus", "kimi-k2"];
-            const secondaryIflowModel = selectedTextModel === "iflow-rome-30ba3b" ? "qwen3-235b-a22b-thinking-2507" : "iflow-rome-30ba3b";
-            const reviewerModel = selectedTextModel === "qwen3-coder-plus" ? "kimi-k2" : "qwen3-coder-plus";
+            const dedupeModels = (arr) => [...new Set((arr || []).filter(Boolean))];
+            const selectedCommitteeModel = selectedTextModel === MODEL_VISION ? DEFAULT_MODEL : selectedTextModel;
+            const textModelPool = [
+                "qwen3-235b-a22b-thinking-2507",
+                "qwen3-max",
+                "kimi-k2-0905",
+                "qwen3-max-preview",
+                "qwen3-32b",
+                "qwen3-235b-a22b-instruct"
+            ];
             const rolePlan = [
                 {
-                    role: "Lead Agent",
+                    role: "Committee Chair",
                     name: "Ardy",
-                    candidates: [selectedTextModel, ...textModelPool],
-                    systemPrompt: "You are Ardy, lead of an internal team debate. Speak to Bella, Charlie, and Daisy only. Never respond directly to the end user. Coordinate, ask for evidence, and decide when debate is complete. Keep every message concise: max 3 sentences and under 80 words."
+                    candidates: dedupeModels([selectedCommitteeModel, "qwen3-235b-a22b-thinking-2507", "kimi-k2-0905", "qwen3-max", ...textModelPool]),
+                    systemPrompt: "You are Ardy, committee chair for performance and structure. Speak only to Bella, Charlie, and Daisy; never answer the user directly. Drive a committee process: define plan, request cross-checks, resolve disagreements, and call end_team_debate only after quorum and evidence checks are satisfied. Keep each turn concise: max 4 sentences and under 120 words."
                 },
                 {
-                    role: "Counterpoint Agent",
+                    role: "Research And Creative Strategist",
                     name: "Bella",
-                    candidates: [secondaryIflowModel, ...textModelPool],
-                    systemPrompt: "You are Bella, the counterpoint specialist in an internal team debate. Speak only to Ardy, Charlie, and Daisy. Never answer the user directly. Challenge assumptions and propose alternatives. Keep every message concise: max 3 sentences and under 80 words."
+                    candidates: dedupeModels([selectedCommitteeModel, "qwen3-max", "kimi-k2-0905", "qwen3-max-preview", ...textModelPool]),
+                    systemPrompt: "You are Bella, committee specialist for research, exploration, and creative alternatives. Speak only to Ardy, Charlie, and Daisy; never answer the user directly. Bring external evidence, propose unconventional options, and challenge weak assumptions. Keep each turn concise: max 4 sentences and under 120 words."
                 },
                 {
-                    role: "Reviewer Agent",
+                    role: "Logic And Implementation Engineer",
                     name: "Charlie",
-                    candidates: [reviewerModel, ...textModelPool],
-                    systemPrompt: "You are Charlie, the reviewer in an internal team debate. Speak only to Ardy, Bella, and Daisy. Never answer the user directly. Validate logic, identify risks, and request missing details. Keep every message concise: max 3 sentences and under 80 words."
+                    candidates: dedupeModels([selectedCommitteeModel, "qwen3-32b", "qwen3-235b-a22b-instruct", "qwen3-max-preview", ...textModelPool]),
+                    systemPrompt: "You are Charlie, committee specialist for coding logic and implementation feasibility. Speak only to Ardy, Bella, and Daisy; never answer the user directly. Convert ideas into concrete steps, surface edge-cases, and verify internal consistency. Keep each turn concise: max 4 sentences and under 120 words."
+                },
+                {
+                    role: "Analyst",
+                    name: "Daisy",
+                    candidates: hasImage
+                        ? dedupeModels([MODEL_VISION, "qwen3-max-preview", "qwen3-max", "qwen3-32b"])
+                        : dedupeModels([selectedCommitteeModel, "qwen3-max-preview", "qwen3-max", "qwen3-32b", ...textModelPool]),
+                    systemPrompt: hasImage
+                        ? "You are Daisy, committee analyst. Inspect the image and extract objective observations, constraints, anomalies, and confidence levels. Speak only to Ardy, Bella, and Charlie; never answer the user directly. Keep each turn concise: max 4 sentences and under 120 words."
+                        : "You are Daisy, committee analyst. Decompose the user problem, identify assumptions and hidden constraints, and quantify tradeoffs when possible. Speak only to Ardy, Bella, and Charlie; never answer the user directly. Keep each turn concise: max 4 sentences and under 120 words."
                 }
             ];
-            if (hasImage) {
-                rolePlan.push({
-                    role: "Vision Agent",
-                    name: "Daisy",
-                    candidates: [MODEL_VISION],
-                    systemPrompt: "You are Daisy, the vision analyst in an internal team debate. You must inspect the provided image and report observations to Ardy, Bella, and Charlie. Never answer the user directly. Keep every message concise: max 3 sentences and under 80 words."
-                });
-                updateThinkingStatus(incomingMessageDiv, "Image detected. Daisy joined the team debate.");
-            }
+            if (hasImage) updateThinkingStatus(incomingMessageDiv, "Image detected. Daisy will run visual analysis for the committee.");
 
             const latestImagePayload = hasImage
                 ? {
@@ -1805,11 +1816,18 @@ const generateBotResponse = async (incomingMessageDiv, historyContext, options =
             const debateTranscript = [];
             const priorityQueue = [];
             const spokeAgents = new Set();
+            const requiredCommitteeMembers = rolePlan.map((r) => r.name);
+            const hasCommitteeQuorum = () => requiredCommitteeMembers.every((name) => spokeAgents.has(name));
+            const complexityHint = String(latestUserText || "");
+            const isComplexTask = hasImage
+                || complexityHint.length > 260
+                || /\b(complex|architecture|system|debug|refactor|optimi|performance|scale|integration|security|analysis|strategy|algorithm|tradeoff)\b/i.test(complexityHint);
             let daisySatisfied = !hasImage;
             let synthesisStream = "";
             let ardyEndedTeamChat = false;
+            let crossCheckEvents = 0;
             let turnCount = 0;
-            const maxTurns = hasImage ? 12 : 9;
+            const maxTurns = isComplexTask ? (hasImage ? 18 : 16) : (hasImage ? 12 : 10);
             const daisyIndex = rolePlan.findIndex((r) => r.name === "Daisy");
 
             const baseDebateTools = [
@@ -1998,8 +2016,8 @@ const generateBotResponse = async (incomingMessageDiv, historyContext, options =
                 const plan = rolePlan[nextAgentIndex()];
                 turnCount += 1;
                 const teamPrompt = debateTranscript.length
-                    ? `Team transcript so far:\n${debateTranscript.map((t, i) => `${i + 1}. ${t}`).join("\n")}`
-                    : "No prior team messages yet.";
+                    ? `Committee transcript so far:\n${debateTranscript.map((t, i) => `${i + 1}. ${t}`).join("\n")}`
+                    : "No prior committee messages yet.";
                 let completed = false;
 
                 for (const modelCandidate of [...new Set(plan.candidates)]) {
@@ -2008,15 +2026,18 @@ const generateBotResponse = async (incomingMessageDiv, historyContext, options =
                     renderMultiAgentStreaming(messageElement, streamSections, synthesisStream);
 
                     try {
-                        updateThinkingStatus(incomingMessageDiv, `${plan.name} turn ${turnCount}: debating with ${modelCandidate}...`);
-                        const userPromptText = `User request to solve:\n${latestUserText}\n${hasImage ? "\n[Current user turn includes an image attachment. Daisy receives the raw image payload.]" : ""}\n\n${teamPrompt}\n\nDebate rules:
+                        updateThinkingStatus(incomingMessageDiv, `${plan.name} turn ${turnCount}: committee review with ${modelCandidate}...`);
+                        const userPromptText = `User request to solve:\n${latestUserText}\n${hasImage ? "\n[Current user turn includes an image attachment. Daisy receives the raw image payload.]" : ""}\n\n${teamPrompt}\n\nCommittee charter:
 - You are speaking only to teammates, never to the user.
+- Work as a think-tank: propose, cross-check, debate, and converge.
 - Keep your response short and actionable.
-- Hard limit: maximum 3 sentences and under 80 words per turn.
+- Hard limit: maximum 4 sentences and under 120 words per turn.
+- Reference at least one teammate claim when agreeing or disagreeing.
 - If you need input from one teammate, call talk_to_agent.
 - If you disagree strongly, call raise_objection.
 - If uncertain facts are involved, call web_search then visit_site for source verification.
-- Charlie should call log_risk for major implementation risks.`;
+- Charlie should call log_risk for major implementation risks.
+- Ardy must not call end_team_debate until every committee member has contributed and at least two cross-check events occurred.`;
                         const baseMessages = [
                             { role: "system", content: plan.systemPrompt },
                             { role: "user", content: userPromptText }
@@ -2029,7 +2050,7 @@ const generateBotResponse = async (incomingMessageDiv, historyContext, options =
                                     content: [
                                         { type: "text", text: latestUserText || "Analyze the attached image for the team." },
                                         latestImagePayload,
-                                        { type: "text", text: `\n\n${teamPrompt}\n\nAnalyze the image and speak only to teammates.` }
+                                        { type: "text", text: `\n\n${teamPrompt}\n\nAnalyze the image for the committee and speak only to teammates.` }
                                     ]
                                 }
                             ]
@@ -2040,15 +2061,19 @@ const generateBotResponse = async (incomingMessageDiv, historyContext, options =
                         let toolRound = 0;
                         let requestedEndDebate = false;
 
-                        while (toolRound < 5) {
-                            const maxToolRounds = plan.name === "Daisy" ? 2 : 5;
+                        const hardToolRoundCap = isComplexTask ? 6 : 5;
+                        while (toolRound < hardToolRoundCap) {
+                            const isDaisyVisionTurn = plan.name === "Daisy" && !!latestImagePayload;
+                            const maxToolRounds = plan.name === "Daisy" ? (isDaisyVisionTurn ? 3 : 4) : (isComplexTask ? 6 : 5);
                             if (toolRound >= maxToolRounds) break;
                             toolRound += 1;
-                            const timeoutMs = plan.name === "Daisy" ? 22000 : 45000;
+                            const timeoutMs = plan.name === "Daisy"
+                                ? (isDaisyVisionTurn ? 26000 : 40000)
+                                : (isComplexTask ? 60000 : 45000);
                             const streamResult = await streamIflowCompletion({
                                 model: modelCandidate,
                                 messages: liveMessages,
-                                temperature: plan.name === "Daisy" ? 0.25 : 0.45,
+                                temperature: plan.name === "Daisy" ? 0.3 : (isComplexTask ? 0.4 : 0.45),
                                 tools: plan.name === "Ardy" ? ardyTools : baseDebateTools,
                                 tool_choice: "auto",
                                 timeoutMs,
@@ -2147,11 +2172,13 @@ const generateBotResponse = async (incomingMessageDiv, historyContext, options =
                                     const to = String(args.to || "").trim();
                                     const msg = String(args.message || "").trim();
                                     queueAgentByName(to);
+                                    crossCheckEvents += 1;
                                     toolResultText = `Message routed to ${to || "team"}: ${msg || "No message provided."}`;
                                 } else if (toolName === "raise_objection") {
                                     const target = String(args.target || "").trim();
                                     const reason = String(args.reason || "").trim();
                                     queueAgentByName(target);
+                                    crossCheckEvents += 1;
                                     toolResultText = `Objection raised against ${target || "team"}: ${reason || "No reason provided."}`;
                                 } else if (toolName === "log_risk") {
                                     const risk = String(args.risk || "").trim();
@@ -2167,6 +2194,13 @@ const generateBotResponse = async (incomingMessageDiv, historyContext, options =
                                     if (hasImage && daisyIndex !== -1 && !daisySatisfied) {
                                         requestedEndDebate = false;
                                         toolResultText = `Debate end request deferred: Daisy must report image analysis first. Requested reason: ${reason}`;
+                                    } else if (!hasCommitteeQuorum()) {
+                                        requestedEndDebate = false;
+                                        const missingMembers = requiredCommitteeMembers.filter((name) => !spokeAgents.has(name)).join(", ");
+                                        toolResultText = `Debate end request deferred: committee quorum incomplete (missing: ${missingMembers}). Requested reason: ${reason}`;
+                                    } else if (crossCheckEvents < 2) {
+                                        requestedEndDebate = false;
+                                        toolResultText = `Debate end request deferred: committee needs more cross-checking (current cross-check events: ${crossCheckEvents}, required: 2). Requested reason: ${reason}`;
                                     } else {
                                         requestedEndDebate = true;
                                         toolResultText = `Debate end requested by Ardy: ${reason}`;
@@ -2236,10 +2270,10 @@ const generateBotResponse = async (incomingMessageDiv, historyContext, options =
             }
 
             if (!ardyEndedTeamChat) {
-                debateTranscript.push("System: Max team turns reached. Proceeding to synthesis.");
+                debateTranscript.push("System: Committee max turns reached. Proceeding to synthesis.");
             }
 
-            const synthesisCandidates = [...new Set([selectedTextModel, ...agentOutputs.map((a) => a.model), ...textModelPool])];
+            const synthesisCandidates = [...new Set([selectedCommitteeModel, ...agentOutputs.map((a) => a.model), ...textModelPool])];
             let synthesisText = "";
             let synthesisModelUsed = "";
             let synthesisError = null;
@@ -2251,10 +2285,10 @@ const generateBotResponse = async (incomingMessageDiv, historyContext, options =
                         messages: [
                             {
                                 role: "system",
-                                content: `You are Ardy doing final synthesis after an internal team debate with ${memberNames.filter((n) => n !== "Ardy").join(", ")}.
+                                content: `You are Ardy doing final synthesis after a committee-model think-tank with ${memberNames.filter((n) => n !== "Ardy").join(", ")}.
 Convert internal discussion into a direct user-facing answer.
 Start with one short paragraph acknowledging teammate contributions by name.
-Then output markdown sections: Team Notes, Final Answer.`
+Then output markdown sections: Committee Notes, Final Answer.`
                             },
                             {
                                 role: "user",

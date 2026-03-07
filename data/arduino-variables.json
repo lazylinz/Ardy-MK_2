@@ -39,14 +39,40 @@
       "variables": {
         "led_brightness": {
           "value": 30,
-          "updatedAt": 1772680786253
+          "updatedAt": 1772864804399
         },
         "temp": {
           "value": 96,
           "updatedAt": 1772615792723
         }
       },
-      "updatedAt": 1772680788282
+      "updatedAt": 1772864804400
+    },
+    "sBlwIZFNieWqbQr4aAGidl3rhDZIGDDi": {
+      "variables": {
+        "led_brightness": {
+          "value": 30,
+          "updatedAt": 1772855490233
+        },
+        "temp": {
+          "value": 96,
+          "updatedAt": 1772615792723
+        }
+      },
+      "updatedAt": 1772855493497
+    },
+    "2oUjyfGhaJs44UE1Looq33PebOrz0Aux": {
+      "variables": {
+        "led_brightness": {
+          "value": 30,
+          "updatedAt": 1772860487374
+        },
+        "temp": {
+          "value": 96,
+          "updatedAt": 1772615792723
+        }
+      },
+      "updatedAt": 1772860491860
     }
   }
 }

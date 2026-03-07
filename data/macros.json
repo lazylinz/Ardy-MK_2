@@ -12,14 +12,35 @@
           "luaScript": "write_variable(\"led_brightness\", 30)",
           "enabled": true,
           "runtimeState": "firing",
-          "lastFiredAt": 1772680786271,
-          "lastStateChangeAt": 1772680786271,
+          "lastFiredAt": 1772864804402,
+          "lastStateChangeAt": 1772864804402,
           "lastRuntimeEvent": "changed variable \"led_brightness\"",
           "createdAt": 1772351472056,
-          "updatedAt": 1772680786271
+          "updatedAt": 1772864804402
         }
       ],
-      "updatedAt": 1772680786274
+      "updatedAt": 1772864804402
+    },
+    "2oUjyfGhaJs44UE1Looq33PebOrz0Aux": {
+      "macros": [
+        {
+          "id": "macro-1772860230772-988",
+          "name": "Night Time LED Control",
+          "triggerLua": "local t = os.date('*t'); return t.hour >= 19 or t.hour < 6",
+          "thenLuaScript": "write_variable('led_state', true)",
+          "elseLuaScript": "write_variable('led_state', false)",
+          "condition": "local t = os.date('*t'); return t.hour >= 19 or t.hour < 6",
+          "luaScript": "write_variable('led_state', true)",
+          "enabled": true,
+          "runtimeState": "idling",
+          "lastFiredAt": 0,
+          "lastStateChangeAt": 1772864804402,
+          "lastRuntimeEvent": "runtime error: Unexpected identifier 't'",
+          "createdAt": 1772860230772,
+          "updatedAt": 1772864804402
+        }
+      ],
+      "updatedAt": 1772864804403
     }
   }
 }
