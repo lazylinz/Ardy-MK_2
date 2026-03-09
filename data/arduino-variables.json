@@ -39,14 +39,14 @@
       "variables": {
         "led_brightness": {
           "value": 30,
-          "updatedAt": 1772864804399
+          "updatedAt": 1772870547436
         },
         "temp": {
           "value": 96,
           "updatedAt": 1772615792723
         }
       },
-      "updatedAt": 1772864804400
+      "updatedAt": 1772870547437
     },
     "sBlwIZFNieWqbQr4aAGidl3rhDZIGDDi": {
       "variables": {
@@ -73,6 +73,19 @@
         }
       },
       "updatedAt": 1772860491860
+    },
+    "global-macro-runtime": {
+      "variables": {
+        "temp": {
+          "value": 96,
+          "updatedAt": 1772615792723
+        },
+        "led_brightness": {
+          "value": 30,
+          "updatedAt": 1773046282343
+        }
+      },
+      "updatedAt": 1773046282344
     }
   }
 }

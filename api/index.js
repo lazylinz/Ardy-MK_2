@@ -75,10 +75,16 @@ const FACE_MATCH_THRESHOLD = Number(process.env.FACE_MATCH_THRESHOLD || 0.47);
 const HOSTED_IMAGE_TTL_MS = 15 * 60 * 1000;
 const HOSTED_IMAGE_MAX_BYTES = 6 * 1024 * 1024;
 const HOSTED_IMAGE_MAX_ITEMS = 300;
+const CAM_INGEST_KEY = String(process.env.CAM_INGEST_KEY || '').trim();
+const CAM_FRAME_TTL_MS = Math.max(1000, Number(process.env.CAM_FRAME_TTL_MS || 15000));
+const CAM_MAX_FRAME_BYTES = Math.max(64 * 1024, Number(process.env.CAM_MAX_FRAME_BYTES || 512 * 1024));
 const quickSigninTokens = new Map();
 const hostedImages = new Map();
+const camMjpegClients = new Set();
+let latestCamFrame = null;
 const MACRO_FIRING_WINDOW_MS = 5000;
 const MACRO_TICK_INTERVAL_MS = 1000;
+const GLOBAL_MACRO_RUNTIME_SESSION_ID = 'global-macro-runtime';
 const macroIdleTimers = new Map();
 let macroRuntimeTickInProgress = false;
 
@@ -992,6 +998,112 @@ function pruneHostedImages() {
     }
 }
 
+function safeCompareSecret(a, b) {
+    const left = Buffer.from(String(a || ''), 'utf8');
+    const right = Buffer.from(String(b || ''), 'utf8');
+    if (left.length === 0 || right.length === 0 || left.length !== right.length) return false;
+    try {
+        return crypto.timingSafeEqual(left, right);
+    } catch (error) {
+        return false;
+    }
+}
+
+function hasValidCamIngestKey(req) {
+    if (!CAM_INGEST_KEY) return false;
+    const fromHeader = String(req.headers['x-cam-key'] || '').trim();
+    const fromQuery = String(req.query?.key || '').trim();
+    const provided = fromHeader || fromQuery;
+    return safeCompareSecret(provided, CAM_INGEST_KEY);
+}
+
+function isCamFrameFresh() {
+    if (!latestCamFrame || !latestCamFrame.receivedAt) return false;
+    return Date.now() - latestCamFrame.receivedAt <= CAM_FRAME_TTL_MS;
+}
+
+function writeMjpegFrame(res, frame) {
+    if (!frame?.buffer || !Buffer.isBuffer(frame.buffer)) return;
+    const mimeType = String(frame.mimeType || 'image/jpeg').toLowerCase();
+    res.write(`--frame\r\nContent-Type: ${mimeType}\r\nContent-Length: ${frame.buffer.length}\r\n\r\n`);
+    res.write(frame.buffer);
+    res.write('\r\n');
+}
+
+function broadcastCamFrame(frame) {
+    for (const client of camMjpegClients) {
+        try {
+            writeMjpegFrame(client, frame);
+        } catch (error) {
+            try {
+                client.end();
+            } catch (innerError) {
+                // no-op
+            }
+            camMjpegClients.delete(client);
+        }
+    }
+}
+
+app.post('/api/cam/push-frame', express.raw({ type: ['image/jpeg', 'application/octet-stream'], limit: `${CAM_MAX_FRAME_BYTES}b` }), (req, res) => {
+    if (!hasValidCamIngestKey(req)) {
+        return res.status(401).json({ error: { message: 'Invalid camera ingest key.' } });
+    }
+
+    const body = req.body;
+    const frameBuffer = Buffer.isBuffer(body) ? body : null;
+    if (!frameBuffer || frameBuffer.length === 0) {
+        return res.status(400).json({ error: { message: 'Request body must contain raw JPEG bytes.' } });
+    }
+    if (frameBuffer.length > CAM_MAX_FRAME_BYTES) {
+        return res.status(413).json({ error: { message: `Frame too large. Max ${CAM_MAX_FRAME_BYTES} bytes.` } });
+    }
+
+    const contentType = String(req.headers['content-type'] || 'image/jpeg').toLowerCase();
+    const mimeType = contentType.startsWith('image/') ? contentType : 'image/jpeg';
+    latestCamFrame = {
+        buffer: frameBuffer,
+        mimeType,
+        receivedAt: Date.now()
+    };
+    broadcastCamFrame(latestCamFrame);
+
+    return res.json({
+        ok: true,
+        bytes: frameBuffer.length,
+        receivedAt: new Date(latestCamFrame.receivedAt).toISOString()
+    });
+});
+
+app.get('/api/cam/latest.jpg', (req, res) => {
+    if (!isCamFrameFresh()) {
+        return res.status(404).json({ error: { message: 'No recent camera frame available.' } });
+    }
+    res.setHeader('Content-Type', latestCamFrame.mimeType || 'image/jpeg');
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+    return res.send(latestCamFrame.buffer);
+});
+
+app.get('/api/cam/stream.mjpeg', (req, res) => {
+    res.status(200);
+    res.setHeader('Content-Type', 'multipart/x-mixed-replace; boundary=frame');
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    if (typeof res.flushHeaders === 'function') res.flushHeaders();
+
+    camMjpegClients.add(res);
+    if (isCamFrameFresh()) {
+        writeMjpegFrame(res, latestCamFrame);
+    }
+
+    req.on('close', () => {
+        camMjpegClients.delete(res);
+    });
+});
+
 app.post('/api/image-upload', requireWhitelistedIp, requireAuth, (req, res) => {
     pruneHostedImages();
     const mimeType = String(req.body?.mimeType || '').trim().toLowerCase();
@@ -1125,10 +1237,8 @@ app.get('/api/server-location', requireWhitelistedIp, requireAuth, (req, res) =>
 
 app.get('/api/macros', requireWhitelistedIp, requireAuth, (req, res) => {
     const store = readMacroStore();
-    const userKey = getSessionUserKey(req);
-    const userState = store.users[userKey] || { macros: [] };
     return res.json({
-        macros: sanitizeMacros(userState.macros)
+        macros: getGlobalMacros(store)
     });
 });
 
@@ -1143,8 +1253,7 @@ app.post('/api/macros', requireWhitelistedIp, requireAuth, (req, res) => {
     }
 
     const store = readMacroStore();
-    const userKey = getSessionUserKey(req);
-    const existing = sanitizeMacros(store.users[userKey]?.macros || []);
+    const existing = getGlobalMacros(store);
     const now = Date.now();
     const macro = {
         id: `macro-${now}-${Math.floor(Math.random() * 1000)}`,
@@ -1164,7 +1273,7 @@ app.post('/api/macros', requireWhitelistedIp, requireAuth, (req, res) => {
         updatedAt: now,
     };
     const macros = [macro, ...existing].slice(0, 500);
-    store.users[userKey] = { macros, updatedAt: now };
+    setGlobalMacros(store, macros, now);
     writeMacroStore(store);
     console.log(`[Macro] create id=${macro.id} name="${macro.name}" enabled=${macro.enabled} state=${macro.runtimeState}`);
     return res.json({ ok: true, macro, macros });
@@ -1175,8 +1284,7 @@ app.put('/api/macros/:id', requireWhitelistedIp, requireAuth, (req, res) => {
     if (!macroId) return res.status(400).json({ error: { message: 'macro id is required' } });
 
     const store = readMacroStore();
-    const userKey = getSessionUserKey(req);
-    const macros = sanitizeMacros(store.users[userKey]?.macros || []);
+    const macros = getGlobalMacros(store);
     const idx = macros.findIndex((macro) => macro.id === macroId);
     if (idx === -1) return res.status(404).json({ error: { message: 'Macro not found' } });
 
@@ -1205,7 +1313,7 @@ app.put('/api/macros/:id', requireWhitelistedIp, requireAuth, (req, res) => {
     macros[idx].updatedAt = Date.now();
 
     const sanitized = sanitizeMacros(macros);
-    store.users[userKey] = { macros: sanitized, updatedAt: Date.now() };
+    setGlobalMacros(store, sanitized, Date.now());
     writeMacroStore(store);
     const updatedMacro = sanitized.find((macro) => macro.id === macroId) || null;
     if (updatedMacro) {
@@ -1219,10 +1327,9 @@ app.delete('/api/macros/:id', requireWhitelistedIp, requireAuth, (req, res) => {
     if (!macroId) return res.status(400).json({ error: { message: 'macro id is required' } });
 
     const store = readMacroStore();
-    const userKey = getSessionUserKey(req);
-    const macros = sanitizeMacros(store.users[userKey]?.macros || []);
+    const macros = getGlobalMacros(store);
     const filtered = macros.filter((macro) => macro.id !== macroId);
-    store.users[userKey] = { macros: filtered, updatedAt: Date.now() };
+    setGlobalMacros(store, filtered, Date.now());
     writeMacroStore(store);
     console.log(`[Macro] delete id=${macroId}`);
     return res.json({ ok: true, macros: filtered });
@@ -1259,7 +1366,7 @@ function ensureMacroStoreFile() {
         fs.mkdirSync(dataDir);
     }
     if (!fs.existsSync(macroStoreFile)) {
-        fs.writeFileSync(macroStoreFile, JSON.stringify({ users: {} }, null, 2));
+        fs.writeFileSync(macroStoreFile, JSON.stringify({ macros: [], updatedAt: null }, null, 2));
     }
 }
 
@@ -1267,17 +1374,45 @@ function readMacroStore() {
     ensureMacroStoreFile();
     try {
         const parsed = JSON.parse(fs.readFileSync(macroStoreFile, 'utf8'));
-        if (!parsed || typeof parsed !== 'object') return { users: {} };
-        if (!parsed.users || typeof parsed.users !== 'object') parsed.users = {};
+        if (!parsed || typeof parsed !== 'object') return { macros: [], updatedAt: null };
+        parsed.macros = collectGlobalMacros(parsed);
+        if (!Number.isFinite(Number(parsed.updatedAt))) parsed.updatedAt = null;
         return parsed;
     } catch (error) {
-        return { users: {} };
+        return { macros: [], updatedAt: null };
     }
 }
 
 function writeMacroStore(store) {
     ensureMacroStoreFile();
     fs.writeFileSync(macroStoreFile, JSON.stringify(store, null, 2));
+}
+
+function collectGlobalMacros(store) {
+    if (!store || typeof store !== 'object') return [];
+    if (Array.isArray(store.macros)) {
+        return sanitizeMacros(store.macros);
+    }
+    if (!store.users || typeof store.users !== 'object') {
+        return [];
+    }
+    const merged = [];
+    for (const userState of Object.values(store.users)) {
+        merged.push(...sanitizeMacros(userState?.macros || []));
+    }
+    return sanitizeMacros(merged);
+}
+
+function getGlobalMacros(store) {
+    return collectGlobalMacros(store);
+}
+
+function setGlobalMacros(store, macros, updatedAt = Date.now()) {
+    store.macros = sanitizeMacros(macros);
+    store.updatedAt = Number.isFinite(Number(updatedAt)) ? Number(updatedAt) : Date.now();
+    if (store.users && typeof store.users === 'object') {
+        delete store.users;
+    }
 }
 
 function sanitizeMacros(rawMacros) {
@@ -1316,20 +1451,19 @@ function sanitizeMacros(rawMacros) {
         .filter((macro) => macro.name && macro.triggerLua && macro.thenLuaScript);
 }
 
-function getMacroTimerKey(sessionId, macroId) {
-    return `${String(sessionId || '')}::${String(macroId || '')}`;
+function getMacroTimerKey(macroId) {
+    return String(macroId || '');
 }
 
-function scheduleMacroToIdle(sessionId, macroId) {
-    const key = getMacroTimerKey(sessionId, macroId);
+function scheduleMacroToIdle(macroId) {
+    const key = getMacroTimerKey(macroId);
     const existing = macroIdleTimers.get(key);
     if (existing) clearTimeout(existing);
 
     const timer = setTimeout(() => {
         try {
             const store = readMacroStore();
-            const userState = store.users[sessionId] || { macros: [] };
-            const macros = sanitizeMacros(userState.macros);
+            const macros = getGlobalMacros(store);
             const idx = macros.findIndex((macro) => macro.id === macroId);
             if (idx === -1) return;
             if (macros[idx].enabled === false) return;
@@ -1337,9 +1471,9 @@ function scheduleMacroToIdle(sessionId, macroId) {
             macros[idx].lastStateChangeAt = Date.now();
             macros[idx].lastRuntimeEvent = 'macro idling (no recent variable write)';
             macros[idx].updatedAt = Date.now();
-            store.users[sessionId] = { macros, updatedAt: Date.now() };
+            setGlobalMacros(store, macros, Date.now());
             writeMacroStore(store);
-            console.log(`[Macro] idling id=${macroId} session=${sessionId}`);
+            console.log(`[Macro] idling id=${macroId}`);
         } catch (error) {
             console.error(`[Macro] failed to set idling id=${macroId}: ${error.message}`);
         } finally {
@@ -1351,22 +1485,19 @@ function scheduleMacroToIdle(sessionId, macroId) {
 }
 
 function handleMacroVariableWriteEvent(event) {
-    const sessionId = String(event?.sessionId || '').trim();
     const sourceMacroId = String(event?.sourceMacroId || '').trim();
     const sourceMacroName = String(event?.sourceMacroName || '').trim();
     const variableName = String(event?.variableName || '').trim();
-    if (!sessionId) return;
     if (!sourceMacroId && !sourceMacroName) return;
 
     const store = readMacroStore();
-    const userState = store.users[sessionId] || { macros: [] };
-    const macros = sanitizeMacros(userState.macros);
+    const macros = getGlobalMacros(store);
     const idx = sourceMacroId
         ? macros.findIndex((macro) => macro.id === sourceMacroId)
         : (sourceMacroName ? macros.findIndex((macro) => macro.name === sourceMacroName) : -1);
 
     if (idx === -1) {
-        console.log(`[Macro] variable write has no macro match session=${sessionId} variable=${variableName}`);
+        console.log(`[Macro] variable write has no macro match variable=${variableName}`);
         return;
     }
 
@@ -1378,11 +1509,11 @@ function handleMacroVariableWriteEvent(event) {
     macro.lastRuntimeEvent = `changed variable "${variableName}"`;
     macro.updatedAt = now;
 
-    store.users[sessionId] = { macros, updatedAt: now };
+    setGlobalMacros(store, macros, now);
     writeMacroStore(store);
     console.log(`[Macro] firing id=${macro.id} name="${macro.name}" variable=${variableName}`);
 
-    scheduleMacroToIdle(sessionId, macro.id);
+    scheduleMacroToIdle(macro.id);
 }
 
 function startMacroRuntimeEngine(arduinoService) {
@@ -1402,27 +1533,21 @@ function startMacroRuntimeEngine(arduinoService) {
 
 async function runMacroRuntimeTick(arduinoService) {
     const store = readMacroStore();
-    const users = store.users && typeof store.users === 'object' ? store.users : {};
+    const macros = getGlobalMacros(store);
     let changed = false;
 
-    for (const [sessionId, userState] of Object.entries(users)) {
-        const macros = sanitizeMacros(userState?.macros || []);
-        let userChanged = false;
-        for (const macro of macros) {
-            if (!macro.enabled) continue;
-            const didChange = await executeMacroRuntimeForOne({ sessionId, macro, arduinoService });
-            if (didChange) userChanged = true;
-        }
-        if (userChanged) {
-            store.users[sessionId] = {
-                macros,
-                updatedAt: Date.now()
-            };
-            changed = true;
-        }
+    for (const macro of macros) {
+        if (!macro.enabled) continue;
+        const didChange = await executeMacroRuntimeForOne({
+            sessionId: GLOBAL_MACRO_RUNTIME_SESSION_ID,
+            macro,
+            arduinoService
+        });
+        if (didChange) changed = true;
     }
 
     if (changed) {
+        setGlobalMacros(store, macros, Date.now());
         writeMacroStore(store);
     }
 }
@@ -1459,7 +1584,7 @@ async function executeMacroRuntimeForOne({ sessionId, macro, arduinoService }) {
             macro.runtimeState = 'firing';
             macro.lastFiredAt = now;
             macro.lastRuntimeEvent = `changed variable "${writeEvents[writeEvents.length - 1]}"`;
-            scheduleMacroToIdle(sessionId, macro.id);
+            scheduleMacroToIdle(macro.id);
         } else {
             macro.runtimeState = 'idling';
             macro.lastRuntimeEvent = `trigger ${branchName === 'then' ? 'true' : 'false'} (no variable change)`;

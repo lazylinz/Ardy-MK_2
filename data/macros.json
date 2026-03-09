@@ -1,46 +1,37 @@
 {
-  "users": {
-    "GAAwY7dY4f0BOIIqj2qD2M-L_pTKRJ3Y": {
-      "macros": [
-        {
-          "id": "macro-1772351472056-438",
-          "name": "Temperature LED Control",
-          "triggerLua": "read_variable(\"temp\") > 38",
-          "thenLuaScript": "write_variable(\"led_brightness\", 30)",
-          "elseLuaScript": "write_variable(\"led_brightness\", 100)",
-          "condition": "read_variable(\"temp\") > 38",
-          "luaScript": "write_variable(\"led_brightness\", 30)",
-          "enabled": true,
-          "runtimeState": "firing",
-          "lastFiredAt": 1772864804402,
-          "lastStateChangeAt": 1772864804402,
-          "lastRuntimeEvent": "changed variable \"led_brightness\"",
-          "createdAt": 1772351472056,
-          "updatedAt": 1772864804402
-        }
-      ],
-      "updatedAt": 1772864804402
+  "macros": [
+    {
+      "id": "macro-1772351472056-438",
+      "name": "Temperature LED Control",
+      "triggerLua": "read_variable(\"temp\") > 38",
+      "thenLuaScript": "write_variable(\"led_brightness\", 30)",
+      "elseLuaScript": "write_variable(\"led_brightness\", 100)",
+      "condition": "read_variable(\"temp\") > 38",
+      "luaScript": "write_variable(\"led_brightness\", 30)",
+      "enabled": true,
+      "runtimeState": "firing",
+      "lastFiredAt": 1773046282347,
+      "lastStateChangeAt": 1773046282347,
+      "lastRuntimeEvent": "changed variable \"led_brightness\"",
+      "createdAt": 1772351472056,
+      "updatedAt": 1773046282347
     },
-    "2oUjyfGhaJs44UE1Looq33PebOrz0Aux": {
-      "macros": [
-        {
-          "id": "macro-1772860230772-988",
-          "name": "Night Time LED Control",
-          "triggerLua": "local t = os.date('*t'); return t.hour >= 19 or t.hour < 6",
-          "thenLuaScript": "write_variable('led_state', true)",
-          "elseLuaScript": "write_variable('led_state', false)",
-          "condition": "local t = os.date('*t'); return t.hour >= 19 or t.hour < 6",
-          "luaScript": "write_variable('led_state', true)",
-          "enabled": true,
-          "runtimeState": "idling",
-          "lastFiredAt": 0,
-          "lastStateChangeAt": 1772864804402,
-          "lastRuntimeEvent": "runtime error: Unexpected identifier 't'",
-          "createdAt": 1772860230772,
-          "updatedAt": 1772864804402
-        }
-      ],
-      "updatedAt": 1772864804403
+    {
+      "id": "macro-1772860230772-988",
+      "name": "Night Time LED Control",
+      "triggerLua": "local t = os.date('*t'); return t.hour >= 19 or t.hour < 6",
+      "thenLuaScript": "write_variable('led_state', true)",
+      "elseLuaScript": "write_variable('led_state', false)",
+      "condition": "local t = os.date('*t'); return t.hour >= 19 or t.hour < 6",
+      "luaScript": "write_variable('led_state', true)",
+      "enabled": true,
+      "runtimeState": "idling",
+      "lastFiredAt": 0,
+      "lastStateChangeAt": 1773046282347,
+      "lastRuntimeEvent": "runtime error: Unexpected identifier 't'",
+      "createdAt": 1772860230772,
+      "updatedAt": 1773046282347
     }
-  }
+  ],
+  "updatedAt": 1773046282347
 }

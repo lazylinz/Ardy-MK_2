@@ -12,6 +12,7 @@
         <a class="nav-btn" href="/chat.html">chat</a>
         <a class="nav-btn active" href="/control.html">control panel</a>
         <a class="nav-btn" href="/macros.html">macros</a>
+        <a class="nav-btn" href="/camera.html">camera</a>
       </aside>
 
       <main class="main">
@@ -30,6 +31,15 @@
         </header>
 
         <section class="frame-wrap">
+          <div class="cloud-gate" id="cloud-gate">
+            <p id="cloud-gate-status">
+              Arduino Cloud in this panel needs an active <code>arduino.cc</code> login in this browser. If you are not logged in, the dashboard connection is refused.
+            </p>
+            <div class="cloud-gate-actions">
+              <button type="button" id="arduino-login-btn">Open Arduino Login</button>
+              <button type="button" id="arduino-connect-btn">Connect Dashboard</button>
+            </div>
+          </div>
           <iframe id="arduino-cloud-frame" title="Arduino Cloud Control Panel" loading="lazy"></iframe>
         </section>
       </main>

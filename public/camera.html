@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Camera Feed - Ardy Assistant</title>
+    <link rel="stylesheet" href="camera_style.css" />
+  </head>
+  <body>
+    <div class="layout">
+      <aside class="sidebar">
+        <a class="nav-btn" href="/chat.html">chat</a>
+        <a class="nav-btn" href="/control.html">control panel</a>
+        <a class="nav-btn" href="/macros.html">macros</a>
+        <a class="nav-btn active" href="/camera.html">camera</a>
+      </aside>
+
+      <main class="main">
+        <header class="header">
+          <div class="header-info">
+            <div class="header-logo-wrap">
+              <img src="LOGO.svg" alt="Ardy logo" class="chatbot-logo" />
+              <div class="brand-text">
+                <span class="brand-kicker">Arduino AIOT Workspace</span>
+                <h2 class="logo-text">Ardy Assistant</h2>
+              </div>
+            </div>
+            <span class="page-pill">Camera Feed</span>
+          </div>
+          <a href="/logout" class="logout">Logout</a>
+        </header>
+
+        <section class="content">
+          <div class="toolbar">
+            <button id="mode-mjpeg" class="toolbar-btn active" type="button">Live MJPEG</button>
+            <button id="mode-snapshot" class="toolbar-btn" type="button">Snapshot Mode</button>
+            <button id="refresh-btn" class="toolbar-btn" type="button">Refresh</button>
+          </div>
+          <p id="feed-status" class="feed-status">Connecting...</p>
+          <div class="frame-wrap">
+            <img id="camera-feed" alt="Live camera feed" />
+          </div>
+        </section>
+      </main>
+    </div>
+    <script src="camera_script.js"></script>
+  </body>
+</html>

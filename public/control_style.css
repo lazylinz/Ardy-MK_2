@@ -154,11 +154,47 @@ body {
   padding: 12px;
   min-height: 0;
   overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.cloud-gate {
+  background: #fff9e7;
+  border: 1px solid #f1d28b;
+  border-radius: 12px;
+  padding: 10px 12px;
+}
+
+.cloud-gate p {
+  margin: 0;
+  font-size: 0.93rem;
+}
+
+.cloud-gate-actions {
+  margin-top: 8px;
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.cloud-gate-actions button {
+  border: 1px solid #d1b26a;
+  background: #fff;
+  color: #5a4520;
+  border-radius: 8px;
+  padding: 6px 10px;
+  cursor: pointer;
+}
+
+.cloud-gate-actions button:hover {
+  background: #fff4d5;
 }
 
 #arduino-cloud-frame {
   width: 100%;
-  height: 100%;
+  flex: 1;
+  min-height: 0;
   border: 1px solid var(--line);
   border-radius: 12px;
   background: var(--panel);
