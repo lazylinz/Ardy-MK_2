@@ -129,6 +129,31 @@ public:
     return status == WL_AP_CONNECTED;
   }
 
+  int getApStatusCode() const {
+    return status;
+  }
+
+  const char* getApStatusLabel() const {
+    switch (status) {
+      case WL_AP_LISTENING:
+        return "WL_AP_LISTENING";
+      case WL_AP_CONNECTED:
+        return "WL_AP_CONNECTED";
+      case WL_IDLE_STATUS:
+        return "WL_IDLE_STATUS";
+      case WL_NO_MODULE:
+        return "WL_NO_MODULE";
+      case WL_CONNECT_FAILED:
+        return "WL_CONNECT_FAILED";
+      case WL_CONNECTION_LOST:
+        return "WL_CONNECTION_LOST";
+      case WL_DISCONNECTED:
+        return "WL_DISCONNECTED";
+      default:
+        return "WL_UNKNOWN";
+    }
+  }
+
 private:
   int led;
   int status;
