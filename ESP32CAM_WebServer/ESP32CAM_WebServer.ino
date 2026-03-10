@@ -15,7 +15,7 @@ const char *uplinkSsid = "SAA Laptop1";
 const char *uplinkPassword = "8P12b29;";
 
 // Optional local AP so clients can still open the camera UI directly.
-const bool kEnableLocalAp = true;
+const bool kEnableLocalAp = false;
 const char *apSsid = "ArdyCam-AP";
 const char *apPassword = "12345678";
 

@@ -740,6 +740,13 @@ function isLocalOrHttpRequest(req) {
 }
 
 function findBestFaceMatch(inputDescriptor) {
+    const bestMatch = findBestFaceCandidate(inputDescriptor);
+    if (!bestMatch) return null;
+    if (bestMatch.distance > FACE_MATCH_THRESHOLD) return null;
+    return bestMatch;
+}
+
+function findBestFaceCandidate(inputDescriptor) {
     const descriptor = sanitizeFaceDescriptor(inputDescriptor);
     if (!descriptor) return null;
 
@@ -751,8 +758,6 @@ function findBestFaceMatch(inputDescriptor) {
             bestMatch = { user, distance };
         }
     }
-    if (!bestMatch) return null;
-    if (bestMatch.distance > FACE_MATCH_THRESHOLD) return null;
     return bestMatch;
 }
 
@@ -980,6 +985,48 @@ app.post('/api/voice/ardy', requireWhitelistedIp, requireAuth, async (req, res) 
         error: {
             message: 'Voice synthesis is temporarily disabled in this deployment.'
         }
+    });
+});
+
+app.post('/api/faces/match-batch', requireWhitelistedIp, requireAuth, (req, res) => {
+    const incoming = Array.isArray(req.body?.descriptors)
+        ? req.body.descriptors
+        : (req.body?.descriptor ? [req.body.descriptor] : []);
+    const descriptors = incoming.slice(0, 6);
+
+    if (!descriptors.length) {
+        return res.status(400).json({
+            error: { message: 'descriptors is required and must contain at least one descriptor.' }
+        });
+    }
+
+    const matches = descriptors.map((rawDescriptor, index) => {
+        const descriptor = sanitizeFaceDescriptor(rawDescriptor);
+        if (!descriptor) {
+            return {
+                index,
+                matched: false,
+                invalid: true
+            };
+        }
+
+        const candidate = findBestFaceCandidate(descriptor);
+        const isMatch = Boolean(candidate && Number.isFinite(candidate.distance) && candidate.distance <= FACE_MATCH_THRESHOLD);
+        return {
+            index,
+            matched: isMatch,
+            distance: candidate?.distance ?? null,
+            threshold: FACE_MATCH_THRESHOLD,
+            userId: isMatch ? candidate.user.id : null,
+            nickname: isMatch ? candidate.user.nickname : null
+        };
+    });
+
+    return res.json({
+        ok: true,
+        count: matches.length,
+        matches,
+        scannedAt: new Date().toISOString()
     });
 });
 

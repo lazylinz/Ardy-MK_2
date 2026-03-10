@@ -145,6 +145,12 @@ body {
   margin: 12px 0 10px;
 }
 
+.face-monitor-status {
+  color: #8fd6ff;
+  margin: 0 0 12px;
+  font-size: 14px;
+}
+
 .frame-wrap {
   border: 1px solid var(--border);
   border-radius: 14px;
@@ -162,6 +168,55 @@ body {
   display: block;
 }
 
+.face-alert-layer {
+  position: fixed;
+  top: 20px;
+  right: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  z-index: 50;
+  max-width: min(92vw, 360px);
+}
+
+.face-alert-toast {
+  background: linear-gradient(145deg, rgba(30, 166, 123, 0.95), rgba(23, 121, 90, 0.96));
+  color: #f4fff9;
+  border: 1px solid rgba(255, 255, 255, 0.28);
+  border-radius: 12px;
+  padding: 12px 14px;
+  box-shadow: 0 14px 26px rgba(0, 0, 0, 0.24);
+  animation: face-toast-in 180ms ease-out;
+}
+
+.face-alert-toast.unknown {
+  background: linear-gradient(145deg, rgba(206, 140, 54, 0.95), rgba(153, 97, 22, 0.96));
+}
+
+.face-alert-title {
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  opacity: 0.88;
+}
+
+.face-alert-text {
+  margin-top: 4px;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+@keyframes face-toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(-6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
 @media (max-width: 900px) {
   .layout {
     grid-template-columns: 1fr;
@@ -172,5 +227,12 @@ body {
     border-bottom: 1px solid var(--border);
     flex-direction: row;
     flex-wrap: wrap;
+  }
+
+  .face-alert-layer {
+    top: 12px;
+    right: 12px;
+    left: 12px;
+    max-width: none;
   }
 }
