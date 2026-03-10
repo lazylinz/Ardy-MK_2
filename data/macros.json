@@ -10,11 +10,11 @@
       "luaScript": "write_variable(\"led_brightness\", 30)",
       "enabled": true,
       "runtimeState": "firing",
-      "lastFiredAt": 1773046282347,
-      "lastStateChangeAt": 1773046282347,
+      "lastFiredAt": 1773046345243,
+      "lastStateChangeAt": 1773046345243,
       "lastRuntimeEvent": "changed variable \"led_brightness\"",
       "createdAt": 1772351472056,
-      "updatedAt": 1773046282347
+      "updatedAt": 1773046345243
     },
     {
       "id": "macro-1772860230772-988",
@@ -27,11 +27,11 @@
       "enabled": true,
       "runtimeState": "idling",
       "lastFiredAt": 0,
-      "lastStateChangeAt": 1773046282347,
+      "lastStateChangeAt": 1773046345244,
       "lastRuntimeEvent": "runtime error: Unexpected identifier 't'",
       "createdAt": 1772860230772,
-      "updatedAt": 1773046282347
+      "updatedAt": 1773046345244
     }
   ],
-  "updatedAt": 1773046282347
+  "updatedAt": 1773046345245
 }
