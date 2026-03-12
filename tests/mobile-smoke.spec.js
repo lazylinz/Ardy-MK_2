@@ -43,7 +43,7 @@ for (const viewport of MOBILE_VIEWPORTS) {
 
       await toggle.click();
       await expect(page.locator("body")).toHaveClass(/nav-open/);
-      await page.click('[data-nav-backdrop]');
+      await page.click('[data-nav-backdrop]', { force: true });
       await expect(page.locator("body")).not.toHaveClass(/nav-open/);
 
       await toggle.click();

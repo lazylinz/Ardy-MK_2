@@ -634,23 +634,29 @@ function coerceString(value) {
 }
 
 function coerceCloudColor(value) {
+    const fromHsbObject = toCloudColorFromHsbObject(value);
+    if (fromHsbObject) return fromHsbObject;
+
     if (typeof value === 'string') {
         const normalized = normalizeHexColorString(value);
-        if (normalized) return normalized;
+        if (normalized) {
+            const rgb = hexToRgb(normalized);
+            if (rgb) return rgbToCloudColor(rgb.r, rgb.g, rgb.b);
+        }
 
         const rgbMatch = value.trim().match(/^rgb\s*\(\s*(\d{1,3})\s*[,\s]\s*(\d{1,3})\s*[,\s]\s*(\d{1,3})\s*\)$/i);
         if (rgbMatch) {
             const red = clampByte(rgbMatch[1]);
             const green = clampByte(rgbMatch[2]);
             const blue = clampByte(rgbMatch[3]);
-            return `#${toHexByte(red)}${toHexByte(green)}${toHexByte(blue)}`;
+            return rgbToCloudColor(red, green, blue);
         }
         const csvMatch = value.trim().match(/^(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})$/);
         if (csvMatch) {
             const red = clampByte(csvMatch[1]);
             const green = clampByte(csvMatch[2]);
             const blue = clampByte(csvMatch[3]);
-            return `#${toHexByte(red)}${toHexByte(green)}${toHexByte(blue)}`;
+            return rgbToCloudColor(red, green, blue);
         }
         return value.slice(0, 4000);
     }
@@ -659,22 +665,27 @@ function coerceCloudColor(value) {
         const red = clampByte(value[0]);
         const green = clampByte(value[1]);
         const blue = clampByte(value[2]);
-        return `#${toHexByte(red)}${toHexByte(green)}${toHexByte(blue)}`;
+        return rgbToCloudColor(red, green, blue);
     }
 
     if (value && typeof value === 'object') {
+        const hsbFromObject = toCloudColorFromHsbObject(value);
+        if (hsbFromObject) return hsbFromObject;
         const red = clampByte(value.r ?? value.red);
         const green = clampByte(value.g ?? value.green);
         const blue = clampByte(value.b ?? value.blue);
-        return `#${toHexByte(red)}${toHexByte(green)}${toHexByte(blue)}`;
+        return rgbToCloudColor(red, green, blue);
     }
 
     if (typeof value === 'number' && Number.isFinite(value)) {
         const packed = Math.max(0, Math.min(0xFFFFFF, Math.trunc(value)));
-        return `#${packed.toString(16).padStart(6, '0').toUpperCase()}`;
+        const red = (packed >> 16) & 0xFF;
+        const green = (packed >> 8) & 0xFF;
+        const blue = packed & 0xFF;
+        return rgbToCloudColor(red, green, blue);
     }
 
-    return '#000000';
+    return { hue: 0, sat: 0, bri: 0 };
 }
 
 function normalizeHexColorString(value) {
@@ -698,8 +709,71 @@ function clampByte(value) {
     return Math.max(0, Math.min(255, Math.trunc(numeric)));
 }
 
-function toHexByte(value) {
-    return clampByte(value).toString(16).padStart(2, '0').toUpperCase();
+function clampColorHue(value) {
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric)) return 0;
+    return Math.max(0, Math.min(360, numeric));
+}
+
+function clampColorPercent(value) {
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric)) return 0;
+    return Math.max(0, Math.min(100, numeric));
+}
+
+function toCloudColorFromHsbObject(value) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+    const rawHue = value.hue ?? value.h ?? value.H ?? value.HUE;
+    const rawSat = value.sat ?? value.s ?? value.S ?? value.saturation ?? value.SAT;
+    const rawBri = value.bri ?? value.v ?? value.V ?? value.value ?? value.brightness ?? value.BRI;
+    const hasAll = rawHue !== undefined && rawSat !== undefined && rawBri !== undefined;
+    if (!hasAll) return null;
+    return {
+        hue: clampColorHue(rawHue),
+        sat: clampColorPercent(rawSat),
+        bri: clampColorPercent(rawBri)
+    };
+}
+
+function hexToRgb(hexWithHash) {
+    const source = String(hexWithHash || '').trim();
+    if (!source.startsWith('#') || source.length !== 7) return null;
+    const red = Number.parseInt(source.slice(1, 3), 16);
+    const green = Number.parseInt(source.slice(3, 5), 16);
+    const blue = Number.parseInt(source.slice(5, 7), 16);
+    if (!Number.isFinite(red) || !Number.isFinite(green) || !Number.isFinite(blue)) return null;
+    return { r: red, g: green, b: blue };
+}
+
+function rgbToCloudColor(red, green, blue) {
+    const r = clampByte(red) / 255;
+    const g = clampByte(green) / 255;
+    const b = clampByte(blue) / 255;
+
+    const max = Math.max(r, g, b);
+    const min = Math.min(r, g, b);
+    const delta = max - min;
+
+    let hue = 0;
+    if (delta !== 0) {
+        if (max === r) {
+            hue = 60 * (((g - b) / delta) % 6);
+        } else if (max === g) {
+            hue = 60 * (((b - r) / delta) + 2);
+        } else {
+            hue = 60 * (((r - g) / delta) + 4);
+        }
+    }
+
+    if (hue < 0) hue += 360;
+    const sat = max === 0 ? 0 : (delta / max) * 100;
+    const bri = max * 100;
+
+    return {
+        hue: Number(clampColorHue(hue).toFixed(2)),
+        sat: Number(clampColorPercent(sat).toFixed(2)),
+        bri: Number(clampColorPercent(bri).toFixed(2))
+    };
 }
 
 function sanitizeArduinoVariables(rawVariables) {

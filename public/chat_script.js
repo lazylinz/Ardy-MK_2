@@ -1329,22 +1329,13 @@ window.addEventListener("pagehide", () => {
 async function executeWebSearch(query, incomingMessageDiv) {
     const messageElement = incomingMessageDiv.querySelector(".message-text");
     const runtime = getUserRuntimeContext();
-
-    const searchBox = document.createElement("div");
-    searchBox.className = "thinking-box";
-    searchBox.innerHTML = `
-        <div class="thinking-box-header">
-            <span class="material-symbols-outlined" style="font-size:16px;">travel_explore</span>
-            <span class="search-status">Searching the web for "${query}"...</span>
-            <span class="material-symbols-outlined toggle-icon">expand_more</span>
-        </div>
-        <div class="thinking-box-content" style="font-size: 0.85em; white-space: pre-wrap;"></div>
-    `;
-
-    messageElement.parentElement.insertBefore(searchBox, messageElement);
-    const contentDiv = searchBox.querySelector(".thinking-box-content");
-    const statusSpan = searchBox.querySelector(".search-status");
-    searchBox.querySelector(".thinking-box-header").addEventListener("click", () => searchBox.classList.toggle("open"));
+    const toolCard = createToolCard({
+        messageElement,
+        icon: "travel_explore",
+        title: "Web Search",
+        status: `Searching for "${query}"...`,
+        variant: "search"
+    });
 
     chatBody.scrollTo({ top: chatBody.scrollHeight, behavior: "smooth" });
 
@@ -1367,9 +1358,13 @@ async function executeWebSearch(query, incomingMessageDiv) {
 
         const results = Array.isArray(payload?.results) ? payload.results : [];
         if (!results.length) {
-            statusSpan.innerText = `No substantial results found for "${query}"`;
+            toolCard.statusEl.innerText = `No substantial results found for "${query}"`;
+            toolCard.contentEl.innerHTML = `<p class="tool-empty-state">No substantial web results returned.</p>`;
             return `Search completed for "${query}", but no substantial content was found.`;
         }
+
+        toolCard.contentEl.innerHTML = renderWebSearchResultsCard(query, results);
+        toolCard.statusEl.innerText = `Found ${results.length} source(s) for "${query}"`;
 
         const formatted = results
             .map((item, i) => {
@@ -1379,35 +1374,121 @@ async function executeWebSearch(query, incomingMessageDiv) {
                 return `${i + 1}. ${title}\nURL: ${url}\nSnippet: ${snippet}`;
             })
             .join("\n\n");
-        contentDiv.innerText = formatted;
-        statusSpan.innerText = `Results found for "${query}"`;
+
         return `Web search results for "${query}":\n${formatted}`;
     } catch (error) {
-        statusSpan.innerText = `Error searching for "${query}"`;
-        contentDiv.innerText = error.message;
+        toolCard.statusEl.innerText = `Search failed for "${query}"`;
+        toolCard.contentEl.innerHTML = `<p class="tool-error-state">${escapeText(error.message)}</p>`;
         return `Error performing live web search: ${error.message}.`;
     }
+}
+
+function createToolCard({ messageElement, icon, title, status, variant = "default" }) {
+    const card = document.createElement("section");
+    card.className = `tool-card tool-card-${variant} open`;
+    card.innerHTML = `
+        <button type="button" class="tool-card-header" aria-expanded="true">
+            <span class="tool-card-head-left">
+                <span class="material-symbols-outlined tool-card-icon">${escapeText(icon)}</span>
+                <span class="tool-card-title-wrap">
+                    <strong class="tool-card-title">${escapeText(title)}</strong>
+                    <span class="tool-card-status">${escapeText(status || "")}</span>
+                </span>
+            </span>
+            <span class="material-symbols-outlined toggle-icon">expand_more</span>
+        </button>
+        <div class="tool-card-content"></div>
+    `;
+
+    messageElement.parentElement.insertBefore(card, messageElement);
+    const header = card.querySelector(".tool-card-header");
+    const contentEl = card.querySelector(".tool-card-content");
+    const statusEl = card.querySelector(".tool-card-status");
+    header.addEventListener("click", () => {
+        card.classList.toggle("open");
+        const expanded = card.classList.contains("open");
+        header.setAttribute("aria-expanded", expanded ? "true" : "false");
+    });
+
+    return { card, contentEl, statusEl };
+}
+
+function getUrlHost(url) {
+    try {
+        return new URL(String(url || "")).host.replace(/^www\./i, "");
+    } catch (error) {
+        return String(url || "");
+    }
+}
+
+function formatToolValue(value) {
+    if (value === undefined) return "undefined";
+    if (value === null) return "null";
+    if (typeof value === "string") return value;
+    if (typeof value === "number" || typeof value === "boolean") return String(value);
+    return JSON.stringify(value);
+}
+
+function renderWebSearchResultsCard(query, results) {
+    const items = results.map((item, index) => {
+        const title = escapeText(item?.title || "Untitled");
+        const url = String(item?.url || "");
+        const safeUrl = escapeText(url);
+        const host = escapeText(getUrlHost(url));
+        const snippet = escapeText(item?.snippet || "No snippet available.");
+        return `
+            <article class="search-result-card">
+                <span class="search-result-rank">${index + 1}</span>
+                <div class="search-result-body">
+                    <a class="search-result-link" href="${safeUrl}" target="_blank" rel="noopener noreferrer">${title}</a>
+                    <span class="search-result-host">${host}</span>
+                    <p class="search-result-snippet">${snippet}</p>
+                </div>
+            </article>
+        `;
+    }).join("");
+
+    return `
+        <div class="search-shell">
+            <div class="search-shell-bar">
+                <span class="material-symbols-outlined">search</span>
+                <span>${escapeText(query)}</span>
+            </div>
+            <div class="search-results-list">${items}</div>
+        </div>
+    `;
+}
+
+function renderVariableCards(variables) {
+    const names = Object.keys(variables || {});
+    if (!names.length) {
+        return `<p class="tool-empty-state">No Arduino variables found.</p>`;
+    }
+
+    const items = names.slice(0, 28).map((name) => {
+        const entry = variables[name] || {};
+        const value = formatToolValue(entry.value);
+        return `
+            <article class="variable-card">
+                <span class="variable-name">${escapeText(name)}</span>
+                <strong class="variable-value">${escapeText(value)}</strong>
+            </article>
+        `;
+    }).join("");
+
+    return `<div class="variable-grid">${items}</div>`;
 }
 
 async function executeVisitSite(url, incomingMessageDiv) {
     const messageElement = incomingMessageDiv.querySelector(".message-text");
     const runtime = getUserRuntimeContext();
-
-    const visitBox = document.createElement("div");
-    visitBox.className = "thinking-box";
-    visitBox.innerHTML = `
-        <div class="thinking-box-header">
-            <span class="material-symbols-outlined" style="font-size:16px;">language</span>
-            <span class="search-status">Visiting ${url}...</span>
-            <span class="material-symbols-outlined toggle-icon">expand_more</span>
-        </div>
-        <div class="thinking-box-content" style="font-size: 0.85em; white-space: pre-wrap;"></div>
-    `;
-
-    messageElement.parentElement.insertBefore(visitBox, messageElement);
-    const contentDiv = visitBox.querySelector(".thinking-box-content");
-    const statusSpan = visitBox.querySelector(".search-status");
-    visitBox.querySelector(".thinking-box-header").addEventListener("click", () => visitBox.classList.toggle("open"));
+    const toolCard = createToolCard({
+        messageElement,
+        icon: "language",
+        title: "Visit Site",
+        status: `Visiting ${url}...`,
+        variant: "visit"
+    });
 
     chatBody.scrollTo({ top: chatBody.scrollHeight, behavior: "smooth" });
 
@@ -1431,37 +1512,36 @@ async function executeVisitSite(url, incomingMessageDiv) {
         const contentType = payload?.result?.contentType || "unknown";
         const resolvedUrl = payload?.result?.url || url;
         if (!text) {
-            statusSpan.innerText = "Visited, but no readable text extracted.";
-            contentDiv.innerText = resolvedUrl;
+            toolCard.statusEl.innerText = "Visited site, but no readable text extracted.";
+            toolCard.contentEl.innerHTML = `<p class="tool-empty-state">${escapeText(resolvedUrl)}</p>`;
             return `Visited ${resolvedUrl} but no readable text was extracted.`;
         }
-        contentDiv.innerText = `URL: ${resolvedUrl}\nType: ${contentType}\n\n${text}`;
-        statusSpan.innerText = `Visited ${resolvedUrl}`;
+
+        toolCard.statusEl.innerText = `Visited ${resolvedUrl}`;
+        toolCard.contentEl.innerHTML = `
+            <div class="visit-meta">
+                <span>${escapeText(getUrlHost(resolvedUrl))}</span>
+                <span>${escapeText(contentType)}</span>
+            </div>
+            <pre class="visit-content">${escapeText(text.slice(0, 5000))}</pre>
+        `;
         return `Visited page content from ${resolvedUrl}:\n${text}`;
     } catch (error) {
-        statusSpan.innerText = `Error visiting ${url}`;
-        contentDiv.innerText = error.message;
+        toolCard.statusEl.innerText = `Error visiting ${url}`;
+        toolCard.contentEl.innerHTML = `<p class="tool-error-state">${escapeText(error.message)}</p>`;
         return `Error visiting site ${url}: ${error.message}`;
     }
 }
 
 async function executeGetAllVariables(incomingMessageDiv) {
     const messageElement = incomingMessageDiv.querySelector(".message-text");
-    const variablesBox = document.createElement("div");
-    variablesBox.className = "thinking-box";
-    variablesBox.innerHTML = `
-        <div class="thinking-box-header">
-            <span class="material-symbols-outlined" style="font-size:16px;">database</span>
-            <span class="search-status">Reading all Arduino variables...</span>
-            <span class="material-symbols-outlined toggle-icon">expand_more</span>
-        </div>
-        <div class="thinking-box-content" style="font-size: 0.85em; white-space: pre-wrap;"></div>
-    `;
-
-    messageElement.parentElement.insertBefore(variablesBox, messageElement);
-    const contentDiv = variablesBox.querySelector(".thinking-box-content");
-    const statusSpan = variablesBox.querySelector(".search-status");
-    variablesBox.querySelector(".thinking-box-header").addEventListener("click", () => variablesBox.classList.toggle("open"));
+    const toolCard = createToolCard({
+        messageElement,
+        icon: "database",
+        title: "Arduino Variables",
+        status: "Reading all variables...",
+        variant: "variables"
+    });
 
     try {
         const response = await fetch(ARDUINO_GET_ALL_VARIABLES_API_URL, {
@@ -1477,22 +1557,22 @@ async function executeGetAllVariables(incomingMessageDiv) {
         const variables = payload?.variables && typeof payload.variables === "object" ? payload.variables : {};
         const names = Object.keys(variables);
         if (!names.length) {
-            statusSpan.innerText = "No Arduino variables found.";
-            contentDiv.innerText = "No variables are currently stored.";
+            toolCard.statusEl.innerText = "No Arduino variables found.";
+            toolCard.contentEl.innerHTML = `<p class="tool-empty-state">No variables are currently stored.</p>`;
             return "No Arduino variables found.";
         }
 
-        const lines = names.slice(0, 80).map((name) => {
-            const entry = variables[name] || {};
-            return `${name}: ${JSON.stringify(entry.value)}`;
+        toolCard.statusEl.innerText = `Loaded ${names.length} variable(s).`;
+        toolCard.contentEl.innerHTML = renderVariableCards(variables);
+        const lines = names.slice(0, 80).map((itemName) => {
+            const entry = variables[itemName] || {};
+            return `${itemName}: ${JSON.stringify(entry.value)}`;
         });
         const bodyText = lines.join("\n");
-        statusSpan.innerText = `Loaded ${names.length} Arduino variable(s).`;
-        contentDiv.innerText = bodyText;
         return `Arduino variables (${names.length}):\n${bodyText}`;
     } catch (error) {
-        statusSpan.innerText = "Error reading Arduino variables";
-        contentDiv.innerText = error.message;
+        toolCard.statusEl.innerText = "Error reading Arduino variables";
+        toolCard.contentEl.innerHTML = `<p class="tool-error-state">${escapeText(error.message)}</p>`;
         return `Error reading all variables: ${error.message}`;
     }
 }
@@ -1502,21 +1582,13 @@ async function executeReadVariable(name, incomingMessageDiv) {
     if (!variableName) return "Read variable failed: name is required.";
 
     const messageElement = incomingMessageDiv.querySelector(".message-text");
-    const readBox = document.createElement("div");
-    readBox.className = "thinking-box";
-    readBox.innerHTML = `
-        <div class="thinking-box-header">
-            <span class="material-symbols-outlined" style="font-size:16px;">visibility</span>
-            <span class="search-status">Reading variable "${escapeText(variableName)}"...</span>
-            <span class="material-symbols-outlined toggle-icon">expand_more</span>
-        </div>
-        <div class="thinking-box-content" style="font-size: 0.85em; white-space: pre-wrap;"></div>
-    `;
-
-    messageElement.parentElement.insertBefore(readBox, messageElement);
-    const contentDiv = readBox.querySelector(".thinking-box-content");
-    const statusSpan = readBox.querySelector(".search-status");
-    readBox.querySelector(".thinking-box-header").addEventListener("click", () => readBox.classList.toggle("open"));
+    const toolCard = createToolCard({
+        messageElement,
+        icon: "visibility",
+        title: "Read Variable",
+        status: `Reading "${variableName}"...`,
+        variant: "variables"
+    });
 
     try {
         const response = await fetch(ARDUINO_READ_VARIABLE_API_URL, {
@@ -1530,12 +1602,18 @@ async function executeReadVariable(name, incomingMessageDiv) {
         }
 
         const value = payload?.value;
-        statusSpan.innerText = `Read variable "${variableName}"`;
-        contentDiv.innerText = JSON.stringify(value, null, 2);
+        toolCard.statusEl.innerText = `Read "${variableName}"`;
+        toolCard.contentEl.innerHTML = `
+            <article class="variable-card variable-card-large">
+                <span class="variable-name">${escapeText(variableName)}</span>
+                <strong class="variable-value">${escapeText(formatToolValue(value))}</strong>
+                <span class="variable-meta">LIVE READ</span>
+            </article>
+        `;
         return `Variable "${variableName}" value: ${JSON.stringify(value)}`;
     } catch (error) {
-        statusSpan.innerText = `Error reading "${variableName}"`;
-        contentDiv.innerText = error.message;
+        toolCard.statusEl.innerText = `Error reading "${variableName}"`;
+        toolCard.contentEl.innerHTML = `<p class="tool-error-state">${escapeText(error.message)}</p>`;
         return `Error reading variable "${variableName}": ${error.message}`;
     }
 }
@@ -1580,21 +1658,13 @@ async function executeWriteVariable(name, value, incomingMessageDiv, meta = {}) 
     const normalizedWriteValue = coerceWriteVariableInput(value);
 
     const messageElement = incomingMessageDiv.querySelector(".message-text");
-    const writeBox = document.createElement("div");
-    writeBox.className = "thinking-box";
-    writeBox.innerHTML = `
-        <div class="thinking-box-header">
-            <span class="material-symbols-outlined" style="font-size:16px;">edit_note</span>
-            <span class="search-status">Writing variable "${escapeText(variableName)}"...</span>
-            <span class="material-symbols-outlined toggle-icon">expand_more</span>
-        </div>
-        <div class="thinking-box-content" style="font-size: 0.85em; white-space: pre-wrap;"></div>
-    `;
-
-    messageElement.parentElement.insertBefore(writeBox, messageElement);
-    const contentDiv = writeBox.querySelector(".thinking-box-content");
-    const statusSpan = writeBox.querySelector(".search-status");
-    writeBox.querySelector(".thinking-box-header").addEventListener("click", () => writeBox.classList.toggle("open"));
+    const toolCard = createToolCard({
+        messageElement,
+        icon: "edit_note",
+        title: "Write Variable",
+        status: `Writing "${variableName}"...`,
+        variant: "variables"
+    });
 
     try {
         const response = await fetch(ARDUINO_WRITE_VARIABLE_API_URL, {
@@ -1612,12 +1682,24 @@ async function executeWriteVariable(name, value, incomingMessageDiv, meta = {}) 
             throw new Error(payload?.error?.message || `${response.status} ${response.statusText}`);
         }
 
-        statusSpan.innerText = `Wrote variable "${variableName}"`;
-        contentDiv.innerText = JSON.stringify(payload?.value, null, 2);
+        const writtenValue = payload?.value;
+        toolCard.statusEl.innerText = `Wrote "${variableName}"`;
+        toolCard.contentEl.innerHTML = `
+            <div class="write-variable-shell">
+                <article class="variable-card">
+                    <span class="variable-name">Requested</span>
+                    <strong class="variable-value">${escapeText(formatToolValue(normalizedWriteValue))}</strong>
+                </article>
+                <article class="variable-card">
+                    <span class="variable-name">Applied</span>
+                    <strong class="variable-value">${escapeText(formatToolValue(writtenValue))}</strong>
+                </article>
+            </div>
+        `;
         return `Variable "${variableName}" updated to: ${JSON.stringify(payload?.value)}`;
     } catch (error) {
-        statusSpan.innerText = `Error writing "${variableName}"`;
-        contentDiv.innerText = error.message;
+        toolCard.statusEl.innerText = `Error writing "${variableName}"`;
+        toolCard.contentEl.innerHTML = `<p class="tool-error-state">${escapeText(error.message)}</p>`;
         return `Error writing variable "${variableName}": ${error.message}`;
     }
 }
@@ -1628,21 +1710,13 @@ async function executeOsTime(args, incomingMessageDiv) {
     const locale = String(args?.locale || runtime.locale || "en-US").trim();
 
     const messageElement = incomingMessageDiv.querySelector(".message-text");
-    const timeBox = document.createElement("div");
-    timeBox.className = "thinking-box";
-    timeBox.innerHTML = `
-        <div class="thinking-box-header">
-            <span class="material-symbols-outlined" style="font-size:16px;">schedule</span>
-            <span class="search-status">Getting OS time (${escapeText(timezone)})...</span>
-            <span class="material-symbols-outlined toggle-icon">expand_more</span>
-        </div>
-        <div class="thinking-box-content" style="font-size: 0.85em; white-space: pre-wrap;"></div>
-    `;
-
-    messageElement.parentElement.insertBefore(timeBox, messageElement);
-    const contentDiv = timeBox.querySelector(".thinking-box-content");
-    const statusSpan = timeBox.querySelector(".search-status");
-    timeBox.querySelector(".thinking-box-header").addEventListener("click", () => timeBox.classList.toggle("open"));
+    const toolCard = createToolCard({
+        messageElement,
+        icon: "schedule",
+        title: "OS Time",
+        status: `Getting OS time (${timezone})...`,
+        variant: "meta"
+    });
 
     try {
         const response = await fetch(OS_TIME_API_URL, {
@@ -1656,12 +1730,18 @@ async function executeOsTime(args, incomingMessageDiv) {
         }
 
         const summary = `ISO: ${payload?.nowIso}\nFormatted: ${payload?.formatted}\nTimezone: ${payload?.timezone}\nEpoch: ${payload?.epochSec}`;
-        statusSpan.innerText = "OS time fetched";
-        contentDiv.innerText = summary;
+        toolCard.statusEl.innerText = "OS time fetched";
+        toolCard.contentEl.innerHTML = `
+            <div class="visit-meta">
+                <span>${escapeText(payload?.timezone || timezone)}</span>
+                <span>${escapeText(locale)}</span>
+            </div>
+            <pre class="visit-content">${escapeText(summary)}</pre>
+        `;
         return `OS time info:\n${summary}`;
     } catch (error) {
-        statusSpan.innerText = "Error fetching OS time";
-        contentDiv.innerText = error.message;
+        toolCard.statusEl.innerText = "Error fetching OS time";
+        toolCard.contentEl.innerHTML = `<p class="tool-error-state">${escapeText(error.message)}</p>`;
         return `Error fetching OS time: ${error.message}`;
     }
 }
