@@ -883,6 +883,13 @@ html {
   /* border-top: 1px solid #eee; */
 }
 
+.chat-disclaimer {
+  margin-top: 8px;
+  text-align: center;
+  font-size: 0.68rem;
+  color: #5b6e77;
+}
+
 .control-panel-wrap {
   flex: 1;
   padding: 12px;

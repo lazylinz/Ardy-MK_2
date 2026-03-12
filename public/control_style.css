@@ -71,6 +71,16 @@ body {
   min-height: 0;
 }
 
+.site-disclaimer {
+  flex-shrink: 0;
+  padding: 8px 14px 12px;
+  border-top: 1px solid var(--line);
+  font-size: 0.78rem;
+  color: #486670;
+  text-align: center;
+  background: #f6fbfc;
+}
+
 .header {
   padding: 10px 16px;
   border-bottom: 4px solid #086d73;
