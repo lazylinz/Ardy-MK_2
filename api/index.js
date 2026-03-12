@@ -75,8 +75,6 @@ const FACE_MATCH_THRESHOLD = Number(process.env.FACE_MATCH_THRESHOLD || 0.42);
 const FACE_MATCH_ANGLE_THRESHOLD = Number(process.env.FACE_MATCH_ANGLE_THRESHOLD || 0.47);
 const FACE_MATCH_MODEL_THRESHOLD = Number(process.env.FACE_MATCH_MODEL_THRESHOLD || 0.45);
 const FACE_MATCH_AMBIGUITY_MARGIN = Number(process.env.FACE_MATCH_AMBIGUITY_MARGIN || 0.015);
-const FACE_ATTEMPT_LOG_MAX = Math.max(10, Number(process.env.FACE_ATTEMPT_LOG_MAX || 120));
-const FACE_DEBUG_ENABLED = String(process.env.FACE_DEBUG_ENABLED || '').trim() === '1' || String(process.env.NODE_ENV || '').trim() !== 'production';
 const HOSTED_IMAGE_TTL_MS = 15 * 60 * 1000;
 const HOSTED_IMAGE_MAX_BYTES = 6 * 1024 * 1024;
 const HOSTED_IMAGE_MAX_ITEMS = 300;
@@ -87,7 +85,6 @@ const quickSigninTokens = new Map();
 const hostedImages = new Map();
 const camMjpegClients = new Set();
 let latestCamFrame = null;
-const recentFaceAttempts = [];
 const MACRO_FIRING_WINDOW_MS = 5000;
 const MACRO_TICK_INTERVAL_MS = 1000;
 const GLOBAL_MACRO_RUNTIME_SESSION_ID = 'global-macro-runtime';
@@ -663,19 +660,6 @@ function sanitizeFaceDescriptor(rawDescriptor) {
 }
 
 const FACE_CAPTURE_ANGLES = ['front', 'left', 'right'];
-const FACE_FAILURE_CODES = {
-    INVALID_SCAN: 'INVALID_SCAN',
-    INCOMPLETE_SCAN: 'INCOMPLETE_SCAN',
-    MISSING_METRICS: 'MISSING_METRICS',
-    SCORE_TOO_HIGH: 'SCORE_TOO_HIGH',
-    ANGLE_MAX_BREACH: 'ANGLE_MAX_BREACH',
-    MODEL_MISMATCH: 'MODEL_MISMATCH',
-    FACE_AMBIGUOUS: 'FACE_AMBIGUOUS',
-    FACE_NOT_RECOGNIZED: 'FACE_NOT_RECOGNIZED',
-    LEGACY_PROFILE_UNSUPPORTED: 'LEGACY_PROFILE_UNSUPPORTED',
-    QUALITY_INVALID: 'QUALITY_INVALID'
-};
-let faceProfileStoreMigrated = false;
 
 function sanitizeFaceDescriptorMap(rawDescriptorMap) {
     if (!rawDescriptorMap || typeof rawDescriptorMap !== 'object' || Array.isArray(rawDescriptorMap)) return null;
@@ -739,12 +723,6 @@ function buildFaceModel3d(descriptorMap, fallbackDescriptor) {
     };
 }
 
-function hashDeviceHint(value) {
-    const source = String(value || '').trim();
-    if (!source) return null;
-    return crypto.createHash('sha256').update(source).digest('hex').slice(0, 24);
-}
-
 function averageFinite(values) {
     const clean = values.filter((value) => Number.isFinite(value));
     if (!clean.length) return null;
@@ -801,54 +779,19 @@ function computeModelDistance(incomingModel, profileModel) {
     return averageFinite(distances);
 }
 
-function sanitizeScanQuality(rawQuality) {
-    if (!rawQuality || typeof rawQuality !== 'object' || Array.isArray(rawQuality)) return null;
-    const byAngle = {};
-    for (const angle of FACE_CAPTURE_ANGLES) {
-        const item = rawQuality?.byAngle?.[angle];
-        if (!item || typeof item !== 'object') continue;
-        byAngle[angle] = {
-            status: String(item.status || '').trim().toLowerCase() || 'fail',
-            reasonCode: String(item.reasonCode || '').trim().toUpperCase() || '',
-            brightness: Number.isFinite(Number(item.brightness)) ? Number(item.brightness) : null,
-            sharpness: Number.isFinite(Number(item.sharpness)) ? Number(item.sharpness) : null,
-            faceBoxFraction: Number.isFinite(Number(item.faceBoxFraction)) ? Number(item.faceBoxFraction) : null,
-            stableSpread: Number.isFinite(Number(item.stableSpread)) ? Number(item.stableSpread) : null
-        };
-    }
-    if (!Object.keys(byAngle).length) return null;
-    return {
-        byAngle,
-        capturedAt: Number.isFinite(Number(rawQuality.capturedAt)) ? Number(rawQuality.capturedAt) : Date.now()
-    };
-}
-
-function sanitizeIncomingFaceScan(rawValue, options = {}) {
-    const { requireThreeAngles = false } = options;
+function sanitizeIncomingFaceScan(rawValue) {
     if (Array.isArray(rawValue)) {
         const descriptor = sanitizeFaceDescriptor(rawValue);
         if (!descriptor) return null;
-        if (requireThreeAngles) return null;
-        return {
-            faceDescriptor: descriptor,
-            faceDescriptors: null,
-            faceModel3d: buildFaceModel3d(null, descriptor),
-            quality: null
-        };
+        return { faceDescriptor: descriptor, faceDescriptors: null, faceModel3d: buildFaceModel3d(null, descriptor) };
     }
 
     if (!rawValue || typeof rawValue !== 'object') return null;
     const descriptorMap = sanitizeFaceDescriptorMap(rawValue.descriptorsByAngle || rawValue.faceDescriptors || rawValue);
-    if (requireThreeAngles && (!descriptorMap || !FACE_CAPTURE_ANGLES.every((angle) => Boolean(descriptorMap[angle])))) return null;
     const singleDescriptor = sanitizeFaceDescriptor(rawValue.descriptor || rawValue.faceDescriptor);
     const descriptor = singleDescriptor || averageFaceDescriptors(descriptorMap ? Object.values(descriptorMap) : []);
     if (!descriptor) return null;
-    return {
-        faceDescriptor: descriptor,
-        faceDescriptors: descriptorMap,
-        faceModel3d: buildFaceModel3d(descriptorMap, descriptor),
-        quality: sanitizeScanQuality(rawValue.quality)
-    };
+    return { faceDescriptor: descriptor, faceDescriptors: descriptorMap, faceModel3d: buildFaceModel3d(descriptorMap, descriptor) };
 }
 
 function sanitizeNickname(rawNickname) {
@@ -872,13 +815,15 @@ function faceDistance(descriptorA, descriptorB) {
 }
 
 function buildFaceCandidateMetrics(incomingScan, profile) {
-    const centerDistance = faceDistance(incomingScan.faceModel3d?.center, profile.faceModel3d?.center);
+    const aggregateDistance = faceDistance(incomingScan.faceDescriptor, profile.faceDescriptor);
     const incomingAngles = incomingScan.faceDescriptors || {};
     const profileAngles = profile.faceDescriptors || {};
+    const incomingAngleCount = Object.keys(incomingAngles).length;
+    const profileAngleCount = Object.keys(profileAngles).length;
     const angleAlignment = computeAngleAlignment(incomingAngles, profileAngles);
     const modelDistance = computeModelDistance(incomingScan.faceModel3d, profile.faceModel3d);
     const weightedParts = [];
-    if (Number.isFinite(centerDistance)) weightedParts.push({ weight: 0.45, value: centerDistance });
+    if (Number.isFinite(aggregateDistance)) weightedParts.push({ weight: 0.45, value: aggregateDistance });
     if (Number.isFinite(angleAlignment.mean)) weightedParts.push({ weight: 0.35, value: angleAlignment.mean });
     if (Number.isFinite(modelDistance)) weightedParts.push({ weight: 0.2, value: modelDistance });
     const weightTotal = weightedParts.reduce((sum, item) => sum + item.weight, 0) || 1;
@@ -886,7 +831,7 @@ function buildFaceCandidateMetrics(incomingScan, profile) {
 
     return {
         distance: combinedDistance,
-        centerDistance,
+        aggregateDistance,
         angleDistances: angleAlignment.distances,
         angleCount: angleAlignment.count,
         angleMeanDistance: angleAlignment.mean,
@@ -894,123 +839,31 @@ function buildFaceCandidateMetrics(incomingScan, profile) {
         strongAngleCount: angleAlignment.strongCount,
         modelDistance,
         mirroredAlignment: angleAlignment.mirrored,
+        incomingAngleCount,
+        profileAngleCount
     };
 }
 
-function evaluateFaceCandidate(candidate) {
-    if (!candidate) return { accepted: false, code: FACE_FAILURE_CODES.INVALID_SCAN };
-    if (!Number.isFinite(candidate.centerDistance) || !Number.isFinite(candidate.angleMeanDistance) || !Number.isFinite(candidate.modelDistance)) {
-        return { accepted: false, code: FACE_FAILURE_CODES.MISSING_METRICS };
+function isFaceCandidateAccepted(candidate) {
+    if (candidate.incomingAngleCount >= 3 && candidate.profileAngleCount < 3) {
+        const legacyThreshold = Math.max(0.3, FACE_MATCH_THRESHOLD - 0.06);
+        return Number.isFinite(candidate.distance)
+            && Number.isFinite(candidate.aggregateDistance)
+            && candidate.distance <= legacyThreshold
+            && candidate.aggregateDistance <= legacyThreshold;
     }
-    if (candidate.angleCount < 3) {
-        return { accepted: false, code: FACE_FAILURE_CODES.MISSING_METRICS };
-    }
-    if (!Number.isFinite(candidate.angleMaxDistance) || candidate.angleMaxDistance > (FACE_MATCH_ANGLE_THRESHOLD + 0.03)) {
-        return { accepted: false, code: FACE_FAILURE_CODES.ANGLE_MAX_BREACH };
-    }
-    if (!Number.isFinite(candidate.modelDistance) || candidate.modelDistance > FACE_MATCH_MODEL_THRESHOLD) {
-        return { accepted: false, code: FACE_FAILURE_CODES.MODEL_MISMATCH };
-    }
-    if (!Number.isFinite(candidate.distance) || candidate.distance > FACE_MATCH_THRESHOLD) {
-        return { accepted: false, code: FACE_FAILURE_CODES.SCORE_TOO_HIGH };
-    }
-    return { accepted: true, code: 'OK' };
-}
+    if (!Number.isFinite(candidate.distance) || candidate.distance > FACE_MATCH_THRESHOLD) return false;
+    if (!Number.isFinite(candidate.aggregateDistance) || candidate.aggregateDistance > FACE_MATCH_THRESHOLD) return false;
 
-function hasCompleteThreeViewProfile(profile) {
-    if (!profile || typeof profile !== 'object') return false;
-    const descriptors = sanitizeFaceDescriptorMap(profile.faceDescriptors || profile.descriptorsByAngle);
-    if (!descriptors || !FACE_CAPTURE_ANGLES.every((angle) => Boolean(descriptors[angle]))) return false;
-    const model = buildFaceModel3d(descriptors, null);
-    return Boolean(model?.center && model?.leftDelta && model?.rightDelta);
-}
-
-function sanitizeEnrollmentMetadata(entry, req) {
-    const quality = sanitizeScanQuality(entry?.quality) || null;
-    const capturedAt = Number.isFinite(Number(entry?.capturedAt))
-        ? Number(entry.capturedAt)
-        : Number.isFinite(Number(quality?.capturedAt)) ? Number(quality.capturedAt) : Date.now();
-    const deviceHint = String(entry?.deviceHash || '').trim() || String(req.headers['x-device-hash'] || '').trim() || String(req.headers['user-agent'] || '').trim();
-    return {
-        capturedAt,
-        quality,
-        deviceHash: hashDeviceHint(deviceHint)
-    };
-}
-
-function validateEnrollmentQuality(quality) {
-    if (!quality || typeof quality !== 'object') {
-        return { ok: false, code: FACE_FAILURE_CODES.QUALITY_INVALID, message: 'Enrollment quality metadata is required.' };
+    if (candidate.angleCount >= 2) {
+        if (!Number.isFinite(candidate.angleMeanDistance) || candidate.angleMeanDistance > FACE_MATCH_ANGLE_THRESHOLD) return false;
+        if (!Number.isFinite(candidate.angleMaxDistance) || candidate.angleMaxDistance > (FACE_MATCH_ANGLE_THRESHOLD + 0.03)) return false;
+        if (candidate.strongAngleCount < Math.min(2, candidate.angleCount)) return false;
     }
-    for (const angle of FACE_CAPTURE_ANGLES) {
-        const item = quality.byAngle?.[angle];
-        if (!item) {
-            return { ok: false, code: FACE_FAILURE_CODES.QUALITY_INVALID, message: `Missing quality metrics for ${angle} view.` };
-        }
-        if (String(item.status || '').toLowerCase() !== 'ok') {
-            const reason = String(item.reasonCode || FACE_FAILURE_CODES.QUALITY_INVALID).toUpperCase();
-            return { ok: false, code: reason, message: `${angle} view failed quality checks.` };
-        }
+    if (Number.isFinite(candidate.modelDistance) && candidate.modelDistance > FACE_MATCH_MODEL_THRESHOLD) {
+        return false;
     }
-    return { ok: true };
-}
-
-function appendFaceAttemptLog(entry) {
-    recentFaceAttempts.push({
-        at: new Date().toISOString(),
-        ...entry
-    });
-    if (recentFaceAttempts.length > FACE_ATTEMPT_LOG_MAX) {
-        recentFaceAttempts.splice(0, recentFaceAttempts.length - FACE_ATTEMPT_LOG_MAX);
-    }
-}
-
-function migrateFaceProfilesToStrictSchema() {
-    ensureFaceProfileStoreFile();
-    if (faceProfileStoreMigrated) return;
-    faceProfileStoreMigrated = true;
-    let parsed = null;
-    try {
-        parsed = JSON.parse(fs.readFileSync(faceProfileStoreFile, 'utf8'));
-    } catch (error) {
-        parsed = { users: [] };
-    }
-    const users = Array.isArray(parsed?.users) ? parsed.users : [];
-    const normalized = [];
-    let removedLegacy = 0;
-    let removedInvalid = 0;
-    for (const entry of users) {
-        const id = String(entry?.id || '').trim();
-        const nickname = sanitizeNickname(entry?.nickname);
-        const descriptors = sanitizeFaceDescriptorMap(entry?.faceDescriptors || entry?.descriptorsByAngle);
-        if (!id || !nickname || !descriptors || !FACE_CAPTURE_ANGLES.every((angle) => Boolean(descriptors[angle]))) {
-            if (sanitizeFaceDescriptor(entry?.faceDescriptor)) removedLegacy += 1;
-            else removedInvalid += 1;
-            continue;
-        }
-        const faceModel3d = buildFaceModel3d(descriptors, null);
-        if (!faceModel3d?.center || !faceModel3d?.leftDelta || !faceModel3d?.rightDelta) {
-            removedInvalid += 1;
-            continue;
-        }
-        const metadata = sanitizeEnrollmentMetadata(entry, { headers: {} });
-        normalized.push({
-            id,
-            nickname,
-            faceDescriptors: descriptors,
-            faceModel3d,
-            enrollment: metadata,
-            createdAt: Number.isFinite(Number(entry?.createdAt)) ? Number(entry.createdAt) : Date.now(),
-            updatedAt: Number.isFinite(Number(entry?.updatedAt)) ? Number(entry.updatedAt) : Date.now(),
-            lastSeenAt: Number.isFinite(Number(entry?.lastSeenAt)) ? Number(entry.lastSeenAt) : null
-        });
-    }
-    const changed = normalized.length !== users.length;
-    if (changed) {
-        fs.writeFileSync(faceProfileStoreFile, JSON.stringify({ users: normalized }, null, 2));
-    }
-    console.log(`[FaceAuth] profile migration strict3d complete: kept=${normalized.length} removedLegacy=${removedLegacy} removedInvalid=${removedInvalid} changed=${changed}`);
-    console.log(`[FaceAuth] thresholds: match=${FACE_MATCH_THRESHOLD} angle=${FACE_MATCH_ANGLE_THRESHOLD} model=${FACE_MATCH_MODEL_THRESHOLD} ambiguity=${FACE_MATCH_AMBIGUITY_MARGIN} debug=${FACE_DEBUG_ENABLED ? 'on' : 'off'}`);
+    return true;
 }
 
 function ensureFaceProfileStoreFile() {
@@ -1024,7 +877,6 @@ function ensureFaceProfileStoreFile() {
 
 function readFaceProfileStore() {
     ensureFaceProfileStoreFile();
-    migrateFaceProfilesToStrictSchema();
     try {
         const parsed = JSON.parse(fs.readFileSync(faceProfileStoreFile, 'utf8'));
         if (!parsed || typeof parsed !== 'object') return { users: [] };
@@ -1035,14 +887,16 @@ function readFaceProfileStore() {
                     const id = String(entry?.id || '').trim();
                     const nickname = sanitizeNickname(entry?.nickname);
                     const descriptorMap = sanitizeFaceDescriptorMap(entry?.faceDescriptors || entry?.descriptorsByAngle);
-                    const faceModel3d = buildFaceModel3d(descriptorMap, null);
-                    if (!id || !nickname || !descriptorMap || !faceModel3d?.center || !faceModel3d?.leftDelta || !faceModel3d?.rightDelta) return null;
+                    const descriptor = sanitizeFaceDescriptor(entry?.faceDescriptor)
+                        || averageFaceDescriptors(descriptorMap ? Object.values(descriptorMap) : []);
+                    const faceModel3d = buildFaceModel3d(descriptorMap, descriptor);
+                    if (!id || !nickname || !descriptor) return null;
                     return {
                         id,
                         nickname,
+                        faceDescriptor: descriptor,
                         faceDescriptors: descriptorMap,
                         faceModel3d,
-                        enrollment: sanitizeEnrollmentMetadata(entry?.enrollment || entry, { headers: {} }),
                         createdAt: Number.isFinite(Number(entry?.createdAt)) ? Number(entry.createdAt) : Date.now(),
                         updatedAt: Number.isFinite(Number(entry?.updatedAt)) ? Number(entry.updatedAt) : Date.now(),
                         lastSeenAt: Number.isFinite(Number(entry?.lastSeenAt)) ? Number(entry.lastSeenAt) : null
@@ -1081,84 +935,38 @@ function isLocalOrHttpRequest(req) {
 }
 
 function findBestFaceMatch(inputDescriptor) {
-    const decision = evaluateFaceMatch(inputDescriptor);
-    if (decision.status !== 'match') return null;
-    return decision.bestMatch;
+    const bestMatch = findBestFaceCandidate(inputDescriptor);
+    if (!bestMatch) return null;
+    if (!isFaceCandidateAccepted(bestMatch)) return null;
+    if (Number.isFinite(bestMatch.secondBestDistance)) {
+        const separation = bestMatch.secondBestDistance - bestMatch.distance;
+        if (separation < FACE_MATCH_AMBIGUITY_MARGIN) return null;
+    }
+    return bestMatch;
 }
 
 function findBestFaceCandidate(inputDescriptor) {
-    const decision = evaluateFaceMatch(inputDescriptor);
-    if (!decision.bestMatch) return null;
-    return decision.bestMatch;
-}
-
-function evaluateFaceMatch(inputDescriptor) {
     const incomingScan = sanitizeIncomingFaceScan(inputDescriptor);
-    if (!incomingScan) {
-        return {
-            status: 'invalid',
-            code: FACE_FAILURE_CODES.INVALID_SCAN,
-            reason: 'Incoming face scan payload was invalid.',
-            bestMatch: null,
-            candidates: []
-        };
-    }
-    const hasThreeAngles = FACE_CAPTURE_ANGLES.every((angle) => Boolean(incomingScan.faceDescriptors?.[angle]));
-    if (!hasThreeAngles) {
-        return {
-            status: 'invalid',
-            code: FACE_FAILURE_CODES.INCOMPLETE_SCAN,
-            reason: 'Incoming scan must include front, left, and right descriptors.',
-            bestMatch: null,
-            candidates: []
-        };
-    }
+    if (!incomingScan) return null;
 
     const store = readFaceProfileStore();
-    const evaluated = [];
+    let bestMatch = null;
+    let secondBestDistance = Number.POSITIVE_INFINITY;
     for (const user of store.users) {
         const metrics = buildFaceCandidateMetrics(incomingScan, user);
-        const gate = evaluateFaceCandidate(metrics);
-        evaluated.push({
-            user,
-            ...metrics,
-            accepted: gate.accepted,
-            rejectCode: gate.code
-        });
-    }
-    evaluated.sort((a, b) => Number(a.distance || Number.POSITIVE_INFINITY) - Number(b.distance || Number.POSITIVE_INFINITY));
-    const passing = evaluated.filter((item) => item.accepted);
-    const bestMatch = passing[0] || null;
-    if (!bestMatch) {
-        return {
-            status: 'no_match',
-            code: FACE_FAILURE_CODES.FACE_NOT_RECOGNIZED,
-            reason: evaluated[0]?.rejectCode || FACE_FAILURE_CODES.FACE_NOT_RECOGNIZED,
-            bestMatch: null,
-            candidates: evaluated.slice(0, 5)
-        };
-    }
-    const secondBest = passing[1] || null;
-    if (secondBest && Number.isFinite(secondBest.distance)) {
-        const separation = secondBest.distance - bestMatch.distance;
-        if (separation < FACE_MATCH_AMBIGUITY_MARGIN) {
-            return {
-                status: 'ambiguous',
-                code: FACE_FAILURE_CODES.FACE_AMBIGUOUS,
-                reason: `Top candidates are too close (${separation.toFixed(4)}).`,
-                bestMatch,
-                secondBest,
-                candidates: evaluated.slice(0, 5)
+        if (!bestMatch || metrics.distance < bestMatch.distance) {
+            secondBestDistance = bestMatch ? bestMatch.distance : secondBestDistance;
+            bestMatch = {
+                user,
+                ...metrics
             };
+        } else if (metrics.distance < secondBestDistance) {
+            secondBestDistance = metrics.distance;
         }
     }
-    return {
-        status: 'match',
-        code: 'MATCH',
-        bestMatch,
-        secondBest,
-        candidates: evaluated.slice(0, 5)
-    };
+    if (!bestMatch) return null;
+    bestMatch.secondBestDistance = Number.isFinite(secondBestDistance) ? secondBestDistance : null;
+    return bestMatch;
 }
 
 function touchFaceProfileLastSeen(userId) {
@@ -1175,8 +983,6 @@ function touchFaceProfileLastSeen(userId) {
     };
     writeFaceProfileStore(store);
 }
-
-migrateFaceProfilesToStrictSchema();
 
 // --- authentication routes ---
 app.post('/login/password', (req, res) => {
@@ -1206,126 +1012,34 @@ app.post('/login', (req, res) => {
 });
 
 app.post('/login/face', (req, res) => {
-    const faceScan = sanitizeIncomingFaceScan(req.body, { requireThreeAngles: true });
+    const faceScan = sanitizeIncomingFaceScan(req.body);
     if (!faceScan) {
-        appendFaceAttemptLog({ route: '/login/face', outcome: 'invalid', code: FACE_FAILURE_CODES.INCOMPLETE_SCAN });
-        return res.status(422).json({
+        return res.status(400).json({ success: false, message: 'Face descriptor is invalid.' });
+    }
+
+    const bestMatch = findBestFaceMatch(faceScan);
+    if (!bestMatch) {
+        return res.status(404).json({
             success: false,
-            code: FACE_FAILURE_CODES.INCOMPLETE_SCAN,
-            message: 'Face scan is invalid. Capture front, left, and right views.'
+            code: 'FACE_NOT_RECOGNIZED',
+            message: 'Face not recognized. Please enroll as a new user.'
         });
     }
 
-    const decision = evaluateFaceMatch(faceScan);
-    if (decision.status === 'match') {
-        establishAuthenticatedRequest(req, res, decision.bestMatch.user.id);
-        touchFaceProfileLastSeen(decision.bestMatch.user.id);
-        appendFaceAttemptLog({
-            route: '/login/face',
-            outcome: 'match',
-            code: 'MATCH',
-            userId: decision.bestMatch.user.id,
-            distance: decision.bestMatch.distance,
-            centerDistance: decision.bestMatch.centerDistance,
-            angleAlignmentDistance: decision.bestMatch.angleMeanDistance,
-            modelDistance: decision.bestMatch.modelDistance,
-            mirroredAlignment: Boolean(decision.bestMatch.mirroredAlignment)
-        });
-        return res.json({
-            success: true,
-            userId: decision.bestMatch.user.id,
-            nickname: decision.bestMatch.user.nickname
-        });
-    }
-
-    if (decision.status === 'ambiguous') {
-        appendFaceAttemptLog({
-            route: '/login/face',
-            outcome: 'ambiguous',
-            code: FACE_FAILURE_CODES.FACE_AMBIGUOUS,
-            distance: decision.bestMatch?.distance ?? null
-        });
-        return res.status(409).json({
-            success: false,
-            code: FACE_FAILURE_CODES.FACE_AMBIGUOUS,
-            message: 'Face scan is ambiguous. Please rescan in stable lighting.'
-        });
-    }
-
-    if (decision.status === 'invalid') {
-        appendFaceAttemptLog({
-            route: '/login/face',
-            outcome: 'invalid',
-            code: decision.code
-        });
-        return res.status(422).json({
-            success: false,
-            code: decision.code || FACE_FAILURE_CODES.INVALID_SCAN,
-            message: 'Face scan quality is invalid. Retake front, left, and right views.'
-        });
-    }
-
-    appendFaceAttemptLog({
-        route: '/login/face',
-        outcome: 'no_match',
-        code: FACE_FAILURE_CODES.FACE_NOT_RECOGNIZED,
-        reasonCode: decision.reason || FACE_FAILURE_CODES.FACE_NOT_RECOGNIZED
-    });
-    return res.status(404).json({
-        success: false,
-        code: FACE_FAILURE_CODES.FACE_NOT_RECOGNIZED,
-        reasonCode: decision.reason || FACE_FAILURE_CODES.FACE_NOT_RECOGNIZED,
-        message: 'Face not recognized. Please enroll as a new user.'
-    });
-});
-
-app.post('/login/face/debug', requireWhitelistedIp, requireAuth, (req, res) => {
-    if (!FACE_DEBUG_ENABLED) {
-        return res.status(404).json({ success: false, message: 'Not found' });
-    }
-    const scan = sanitizeIncomingFaceScan(req.body, { requireThreeAngles: true });
-    if (!scan) {
-        return res.status(422).json({
-            success: false,
-            code: FACE_FAILURE_CODES.INCOMPLETE_SCAN,
-            message: 'Debug scan requires front, left, and right descriptors.'
-        });
-    }
-    const decision = evaluateFaceMatch(scan);
-    const topCandidates = (decision.candidates || []).slice(0, 5).map((item) => ({
-        userId: item.user?.id || null,
-        nickname: item.user?.nickname || null,
-        accepted: Boolean(item.accepted),
-        rejectCode: item.rejectCode || null,
-        distance: item.distance ?? null,
-        centerDistance: item.centerDistance ?? null,
-        angleAlignmentDistance: item.angleMeanDistance ?? null,
-        angleMaxDistance: item.angleMaxDistance ?? null,
-        modelDistance: item.modelDistance ?? null,
-        mirroredAlignment: Boolean(item.mirroredAlignment)
-    }));
+    establishAuthenticatedRequest(req, res, bestMatch.user.id);
+    touchFaceProfileLastSeen(bestMatch.user.id);
     return res.json({
         success: true,
-        status: decision.status,
-        code: decision.code,
-        reason: decision.reason || null,
-        thresholds: {
-            FACE_MATCH_THRESHOLD,
-            FACE_MATCH_ANGLE_THRESHOLD,
-            FACE_MATCH_MODEL_THRESHOLD,
-            FACE_MATCH_AMBIGUITY_MARGIN
-        },
-        topCandidates,
-        recentAttempts: recentFaceAttempts.slice(-10)
+        userId: bestMatch.user.id,
+        nickname: bestMatch.user.nickname
     });
 });
 
 app.post('/login/enroll', (req, res) => {
-    const faceScan = sanitizeIncomingFaceScan(req.body, { requireThreeAngles: true });
+    const faceScan = sanitizeIncomingFaceScan(req.body);
     const nickname = sanitizeNickname(req.body?.nickname);
     const password = String(req.body?.password || '');
     const isPasswordAllowed = password === PASSWORD || hasRecentPasswordVerification(req);
-    const enrollment = sanitizeEnrollmentMetadata(req.body, req);
 
     if (!isPasswordAllowed) {
         return res.status(401).json({
@@ -1333,19 +1047,15 @@ app.post('/login/enroll', (req, res) => {
             message: 'Password verification required before enrollment.'
         });
     }
-    if (!faceScan?.faceModel3d?.center || !faceScan.faceModel3d.leftDelta || !faceScan.faceModel3d.rightDelta) {
-        return res.status(400).json({
-            success: false,
-            code: FACE_FAILURE_CODES.INCOMPLETE_SCAN,
-            message: 'Enrollment requires a 3-step scan: front, left, and right views.'
-        });
+    if (!faceScan?.faceDescriptor) {
+        return res.status(400).json({ success: false, message: 'Face descriptor is invalid.' });
     }
-    const qualityValidation = validateEnrollmentQuality(enrollment.quality);
-    if (!qualityValidation.ok) {
+    const angleMap = faceScan.faceDescriptors || {};
+    const hasThreeViewScan = FACE_CAPTURE_ANGLES.every((angle) => Boolean(angleMap[angle]));
+    if (!hasThreeViewScan) {
         return res.status(400).json({
             success: false,
-            code: qualityValidation.code,
-            message: qualityValidation.message
+            message: 'Enrollment requires a 3-step scan: front, left, and right views.'
         });
     }
     if (!nickname || !/^[A-Za-z0-9 _.-]{2,32}$/.test(nickname)) {
@@ -1355,21 +1065,13 @@ app.post('/login/enroll', (req, res) => {
         });
     }
 
-    const existingDecision = evaluateFaceMatch(faceScan);
-    if (existingDecision.status === 'match') {
+    const existing = findBestFaceMatch(faceScan);
+    if (existing) {
         return res.status(409).json({
             success: false,
-            code: 'FACE_ALREADY_ENROLLED',
             message: 'This face is already enrolled.',
-            userId: existingDecision.bestMatch.user.id,
-            nickname: existingDecision.bestMatch.user.nickname
-        });
-    }
-    if (existingDecision.status === 'ambiguous') {
-        return res.status(409).json({
-            success: false,
-            code: FACE_FAILURE_CODES.FACE_AMBIGUOUS,
-            message: 'Face is too close to an existing profile. Improve lighting and retry enrollment.'
+            userId: existing.user.id,
+            nickname: existing.user.nickname
         });
     }
 
@@ -1379,12 +1081,9 @@ app.post('/login/enroll', (req, res) => {
     store.users.push({
         id: userId,
         nickname,
+        faceDescriptor: faceScan.faceDescriptor,
         faceDescriptors: faceScan.faceDescriptors,
         faceModel3d: faceScan.faceModel3d,
-        enrollment: {
-            ...enrollment,
-            capturedAt: enrollment.capturedAt || now
-        },
         createdAt: now,
         updatedAt: now,
         lastSeenAt: now
@@ -1520,26 +1219,24 @@ app.post('/api/faces/match-batch', requireWhitelistedIp, requireAuth, (req, res)
     }
 
     const matches = descriptors.map((rawDescriptor, index) => {
-        const faceScan = sanitizeIncomingFaceScan(rawDescriptor, { requireThreeAngles: true });
+        const faceScan = sanitizeIncomingFaceScan(rawDescriptor);
         if (!faceScan) {
             return {
                 index,
                 matched: false,
-                invalid: true,
-                code: FACE_FAILURE_CODES.INCOMPLETE_SCAN
+                invalid: true
             };
         }
 
-        const decision = evaluateFaceMatch(faceScan);
-        const isMatch = decision.status === 'match';
+        const candidate = findBestFaceCandidate(faceScan);
+        const isMatch = Boolean(candidate && isFaceCandidateAccepted(candidate));
         return {
             index,
             matched: isMatch,
-            distance: decision.bestMatch?.distance ?? null,
+            distance: candidate?.distance ?? null,
             threshold: FACE_MATCH_THRESHOLD,
-            code: decision.code,
-            userId: isMatch ? decision.bestMatch.user.id : null,
-            nickname: isMatch ? decision.bestMatch.user.nickname : null
+            userId: isMatch ? candidate.user.id : null,
+            nickname: isMatch ? candidate.user.nickname : null
         };
     });
 
