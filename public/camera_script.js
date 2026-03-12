@@ -112,7 +112,7 @@ async function ensureFaceModelsReady() {
     faceapi.nets.faceRecognitionNet.loadFromUri(FACE_MODEL_URI)
   ]).then(() => {
     monitorState.modelsReady = true;
-h  });
+  });
 
   await monitorState.modelsLoading;
 }

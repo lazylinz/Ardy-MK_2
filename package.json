@@ -4,7 +4,9 @@
   "description": "Comprehensive LLM Chat Application with streaming, markdown, and advanced features",
   "scripts": {
     "start": "node api/index.js",
-    "dev": "node api/index.js"
+    "dev": "node api/index.js",
+    "test:mobile": "playwright test --config=playwright.config.js tests/mobile-smoke.spec.js",
+    "test:mobile:headed": "playwright test --config=playwright.config.js tests/mobile-smoke.spec.js --headed"
   },
   "dependencies": {
     "axios": "^1.13.6",
@@ -16,5 +18,8 @@
     "marked": "^10.0.0",
     "multer": "^1.4.5-lts.2",
     "selfsigned": "^5.5.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.54.2"
   }
 }

@@ -8,7 +8,7 @@
   </head>
   <body>
     <div class="layout">
-      <aside class="sidebar">
+      <aside class="sidebar" id="primary-nav" tabindex="-1" aria-label="Primary navigation">
         <a class="nav-btn" href="/chat.html">chat</a>
         <a class="nav-btn active" href="/control.html">control panel</a>
         <a class="nav-btn" href="/macros.html">macros</a>
@@ -17,6 +17,16 @@
 
       <main class="main">
         <header class="header">
+          <button
+            type="button"
+            class="menu-toggle"
+            data-nav-toggle
+            aria-controls="primary-nav"
+            aria-expanded="false"
+            aria-label="Open navigation menu"
+          >
+            Menu
+          </button>
           <div class="header-info">
             <div class="header-logo-wrap">
               <img src="LOGO.svg" alt="Ardy logo" class="chatbot-logo" />
@@ -46,7 +56,9 @@
           This is an independent project and is not affiliated with, or endorsed by, Arduino SA.
         </footer>
       </main>
+      <div class="nav-backdrop" data-nav-backdrop aria-hidden="true"></div>
     </div>
+    <script src="app_shell.js"></script>
     <script src="control_script.js"></script>
   </body>
 </html>
