@@ -1968,19 +1968,19 @@ const generateBotResponse = async (incomingMessageDiv, historyContext, options =
                 {
                     role: "Committee Chair",
                     name: "Ardy",
-                    candidates: dedupeModels([selectedCommitteeModel, "qwen3-235b-a22b-thinking-2507", "kimi-k2-0905", "qwen3-max", ...textModelPool]),
+                    candidates: dedupeModels(["qwen3-235b-a22b-thinking-2507", "kimi-k2-0905", "qwen3-max", ...textModelPool]),
                     systemPrompt: "You are Ardy, committee chair for performance and structure. Speak only to Bella, Charlie, and Daisy; never answer the user directly. Drive a committee process: define plan, request cross-checks, resolve disagreements, and call end_team_debate only after quorum and evidence checks are satisfied. Keep each turn concise: max 4 sentences and under 120 words."
                 },
                 {
                     role: "Research And Creative Strategist",
                     name: "Bella",
-                    candidates: dedupeModels([selectedCommitteeModel, "qwen3-max", "kimi-k2-0905", "qwen3-max-preview", ...textModelPool]),
+                    candidates: dedupeModels(["kimi-k2-0905", "qwen3-max-preview", ...textModelPool]),
                     systemPrompt: "You are Bella, committee specialist for research, exploration, and creative alternatives. Speak only to Ardy, Charlie, and Daisy; never answer the user directly. Bring external evidence, propose unconventional options, and challenge weak assumptions. Keep each turn concise: max 4 sentences and under 120 words."
                 },
                 {
                     role: "Logic And Implementation Engineer",
                     name: "Charlie",
-                    candidates: dedupeModels([selectedCommitteeModel, "qwen3-32b", "qwen3-235b-a22b-instruct", "qwen3-max-preview", ...textModelPool]),
+                    candidates: dedupeModels(["qwen3-32b", "qwen3-235b-a22b-instruct", "qwen3-max-preview", ...textModelPool]),
                     systemPrompt: "You are Charlie, committee specialist for coding logic and implementation feasibility. Speak only to Ardy, Bella, and Daisy; never answer the user directly. Convert ideas into concrete steps, surface edge-cases, and verify internal consistency. Keep each turn concise: max 4 sentences and under 120 words."
                 },
                 {
