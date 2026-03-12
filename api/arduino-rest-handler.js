@@ -102,7 +102,7 @@ function createArduinoService(options = {}) {
                 err.status = 400;
                 throw err;
             }
-            const nextValue = sanitizeArduinoVariableValue(value);
+            const nextValue = sanitizeArduinoVariableValue(parseValueLiteral(value));
 
             if (cloudEnabled) {
                 const entry = await writeVariableToCloud(variableName, nextValue, cloudConfig, tokenState);
@@ -286,8 +286,10 @@ async function getAllVariablesFromCloud(cloudConfig, tokenState) {
     properties.forEach((prop) => {
         const name = sanitizeArduinoVariableName(getPropertyName(prop)) || sanitizeArduinoVariableName(String(prop?.id || ''));
         if (!name) return;
+        const propertyType = getPropertyType(prop);
         variables[name] = {
-            value: sanitizeArduinoVariableValue(getPropertyValue(prop)),
+            value: sanitizeArduinoVariableValue(normalizeValueForPropertyType(getPropertyValue(prop), propertyType)),
+            type: propertyType || null,
             updatedAt: normalizeUpdatedAt(getPropertyUpdatedAt(prop))
         };
     });
@@ -297,15 +299,27 @@ async function getAllVariablesFromCloud(cloudConfig, tokenState) {
 async function readVariableFromCloud(name, cloudConfig, tokenState) {
     const property = await getPropertyByName(name, cloudConfig, tokenState);
     const detail = await getThingPropertyDetail(property.id, cloudConfig, tokenState);
+    const propertyType = getPropertyType(detail) || getPropertyType(property);
     return {
-        value: sanitizeArduinoVariableValue(getPropertyValue(detail)),
+        value: sanitizeArduinoVariableValue(normalizeValueForPropertyType(getPropertyValue(detail), propertyType)),
+        type: propertyType || null,
         updatedAt: normalizeUpdatedAt(getPropertyUpdatedAt(detail))
     };
 }
 
 async function writeVariableToCloud(name, value, cloudConfig, tokenState) {
     const property = await getPropertyByName(name, cloudConfig, tokenState);
-    const body = { value: sanitizeArduinoVariableValue(value) };
+    let propertyType = getPropertyType(property);
+    if (!propertyType) {
+        try {
+            const detail = await getThingPropertyDetail(property.id, cloudConfig, tokenState);
+            propertyType = getPropertyType(detail) || '';
+        } catch (error) {
+            propertyType = '';
+        }
+    }
+    const coercedWriteValue = normalizeValueForPropertyType(value, propertyType);
+    const body = { value: sanitizeArduinoVariableValue(coercedWriteValue) };
 
     const published = await requestWithAuth(cloudConfig, tokenState, async (token) => {
         const url = `${cloudConfig.baseUrl}/things/${encodeURIComponent(cloudConfig.thingId)}/properties/${encodeURIComponent(property.id)}/publish`;
@@ -320,7 +334,8 @@ async function writeVariableToCloud(name, value, cloudConfig, tokenState) {
     });
 
     return {
-        value: sanitizeArduinoVariableValue(getPropertyValue(published, body.value)),
+        value: sanitizeArduinoVariableValue(normalizeValueForPropertyType(getPropertyValue(published, body.value), propertyType)),
+        type: propertyType || null,
         updatedAt: normalizeUpdatedAt(getPropertyUpdatedAt(published, Date.now()))
     };
 }
@@ -425,6 +440,17 @@ function getPropertyValue(property, fallback = null) {
     return fallback;
 }
 
+function getPropertyType(property) {
+    const raw =
+        property?.type ||
+        property?.value_type ||
+        property?.variable_type ||
+        property?.data_type ||
+        property?.datatype ||
+        '';
+    return String(raw || '').trim();
+}
+
 function getPropertyUpdatedAt(property, fallback = null) {
     return property?.last_value_updated_at || property?.value_updated_at || property?.updated_at || fallback;
 }
@@ -464,6 +490,7 @@ function persistOneVariableToLocalStore(name, entry, userKey, arduinoVariableSto
     const variables = sanitizeArduinoVariables(userState.variables);
     variables[name] = {
         value: sanitizeArduinoVariableValue(entry?.value),
+        type: sanitizeArduinoPropertyType(entry?.type),
         updatedAt: normalizeUpdatedAt(entry?.updatedAt)
     };
     const now = Date.now();
@@ -520,6 +547,161 @@ function sanitizeArduinoVariableValue(value) {
     }
 }
 
+function normalizeValueForPropertyType(rawValue, propertyType) {
+    const parsedValue = parseValueLiteral(rawValue);
+    const normalizedType = String(propertyType || '').trim().toLowerCase();
+    if (!normalizedType) return sanitizeArduinoVariableValue(parsedValue);
+
+    if (/(^|[_\s-])(bool|boolean)([_\s-]|$)/.test(normalizedType)) {
+        return coerceBoolean(parsedValue);
+    }
+    if (/(^|[_\s-])(color|colour|rgb|cloudcolor)([_\s-]|$)/.test(normalizedType)) {
+        return coerceCloudColor(parsedValue);
+    }
+    if (
+        /(^|[_\s-])(int|integer|long|short|byte|word|uint|sint|unsigned)([_\s-]|$)/.test(normalizedType) &&
+        !/(float|double|decimal)/.test(normalizedType)
+    ) {
+        return coerceNumber(parsedValue, { integer: true });
+    }
+    if (/(^|[_\s-])(float|double|decimal|number)([_\s-]|$)/.test(normalizedType)) {
+        return coerceNumber(parsedValue, { integer: false });
+    }
+    if (/(^|[_\s-])(string|text|char|stringproperty)([_\s-]|$)/.test(normalizedType)) {
+        return coerceString(parsedValue);
+    }
+
+    return sanitizeArduinoVariableValue(parsedValue);
+}
+
+function parseValueLiteral(rawValue) {
+    if (typeof rawValue !== 'string') return rawValue;
+    const trimmed = rawValue.trim();
+    if (!trimmed) return '';
+
+    if (/^[-+]?\d+(?:\.\d+)?$/.test(trimmed)) {
+        const numeric = Number(trimmed);
+        if (Number.isFinite(numeric)) return numeric;
+    }
+    if (/^(true|false)$/i.test(trimmed)) {
+        return trimmed.toLowerCase() === 'true';
+    }
+    if (/^null$/i.test(trimmed)) {
+        return null;
+    }
+
+    if (
+        (trimmed.startsWith('{') && trimmed.endsWith('}')) ||
+        (trimmed.startsWith('[') && trimmed.endsWith(']'))
+    ) {
+        try {
+            return JSON.parse(trimmed);
+        } catch (error) {
+            return rawValue;
+        }
+    }
+
+    if (
+        (trimmed.startsWith('"') && trimmed.endsWith('"')) ||
+        (trimmed.startsWith("'") && trimmed.endsWith("'"))
+    ) {
+        return trimmed.slice(1, -1);
+    }
+
+    return rawValue;
+}
+
+function coerceBoolean(value) {
+    if (typeof value === 'boolean') return value;
+    if (typeof value === 'number') return Number.isFinite(value) ? value !== 0 : false;
+    const normalized = String(value || '').trim().toLowerCase();
+    if (['1', 'true', 'on', 'yes', 'y'].includes(normalized)) return true;
+    if (['0', 'false', 'off', 'no', 'n', ''].includes(normalized)) return false;
+    return Boolean(normalized);
+}
+
+function coerceNumber(value, { integer = false } = {}) {
+    if (typeof value === 'number' && Number.isFinite(value)) {
+        return integer ? Math.trunc(value) : value;
+    }
+    const candidate = Number(String(value ?? '').trim());
+    if (!Number.isFinite(candidate)) return integer ? 0 : 0.0;
+    return integer ? Math.trunc(candidate) : candidate;
+}
+
+function coerceString(value) {
+    return String(value ?? '').slice(0, 4000);
+}
+
+function coerceCloudColor(value) {
+    if (typeof value === 'string') {
+        const normalized = normalizeHexColorString(value);
+        if (normalized) return normalized;
+
+        const rgbMatch = value.trim().match(/^rgb\s*\(\s*(\d{1,3})\s*[,\s]\s*(\d{1,3})\s*[,\s]\s*(\d{1,3})\s*\)$/i);
+        if (rgbMatch) {
+            const red = clampByte(rgbMatch[1]);
+            const green = clampByte(rgbMatch[2]);
+            const blue = clampByte(rgbMatch[3]);
+            return `#${toHexByte(red)}${toHexByte(green)}${toHexByte(blue)}`;
+        }
+        const csvMatch = value.trim().match(/^(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})$/);
+        if (csvMatch) {
+            const red = clampByte(csvMatch[1]);
+            const green = clampByte(csvMatch[2]);
+            const blue = clampByte(csvMatch[3]);
+            return `#${toHexByte(red)}${toHexByte(green)}${toHexByte(blue)}`;
+        }
+        return value.slice(0, 4000);
+    }
+
+    if (Array.isArray(value) && value.length >= 3) {
+        const red = clampByte(value[0]);
+        const green = clampByte(value[1]);
+        const blue = clampByte(value[2]);
+        return `#${toHexByte(red)}${toHexByte(green)}${toHexByte(blue)}`;
+    }
+
+    if (value && typeof value === 'object') {
+        const red = clampByte(value.r ?? value.red);
+        const green = clampByte(value.g ?? value.green);
+        const blue = clampByte(value.b ?? value.blue);
+        return `#${toHexByte(red)}${toHexByte(green)}${toHexByte(blue)}`;
+    }
+
+    if (typeof value === 'number' && Number.isFinite(value)) {
+        const packed = Math.max(0, Math.min(0xFFFFFF, Math.trunc(value)));
+        return `#${packed.toString(16).padStart(6, '0').toUpperCase()}`;
+    }
+
+    return '#000000';
+}
+
+function normalizeHexColorString(value) {
+    const source = String(value || '').trim();
+    if (!source) return '';
+    const hex = source.startsWith('#') ? source.slice(1) : source;
+    if (!/^[0-9a-fA-F]+$/.test(hex)) return '';
+    if (hex.length === 3) {
+        const doubled = hex.split('').map((ch) => ch + ch).join('');
+        return `#${doubled.toUpperCase()}`;
+    }
+    if (hex.length === 6) {
+        return `#${hex.toUpperCase()}`;
+    }
+    return '';
+}
+
+function clampByte(value) {
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric)) return 0;
+    return Math.max(0, Math.min(255, Math.trunc(numeric)));
+}
+
+function toHexByte(value) {
+    return clampByte(value).toString(16).padStart(2, '0').toUpperCase();
+}
+
 function sanitizeArduinoVariables(rawVariables) {
     if (!rawVariables || typeof rawVariables !== 'object' || Array.isArray(rawVariables)) {
         return {};
@@ -533,10 +715,17 @@ function sanitizeArduinoVariables(rawVariables) {
             : { value, updatedAt: Date.now() };
         cleaned[name] = {
             value: sanitizeArduinoVariableValue(candidate.value),
+            type: sanitizeArduinoPropertyType(candidate.type),
             updatedAt: normalizeUpdatedAt(candidate.updatedAt)
         };
     }
     return cleaned;
+}
+
+function sanitizeArduinoPropertyType(type) {
+    const normalized = String(type || '').trim();
+    if (!normalized) return null;
+    return normalized.slice(0, 120);
 }
 
 function isValidIanaTimeZone(timezone) {

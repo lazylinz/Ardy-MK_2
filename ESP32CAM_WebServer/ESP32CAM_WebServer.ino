@@ -23,7 +23,7 @@ const char *apPassword = "12345678";
 const bool kEnableCloudPush = true;
 const char *cloudPushUrl = "https://ardy-mk-2.vercel.app/api/cam/push-frame";
 const char *cloudPushKey = "lenard10";
-const unsigned long kCloudPushIntervalMs = 1200;
+const unsigned long kCloudPushIntervalMs = 500;
 
 unsigned long lastCloudPushAtMs = 0;
 unsigned long pushAttemptCount = 0;
@@ -120,14 +120,14 @@ void setup() {
   //config.pixel_format = PIXFORMAT_RGB565; // for face detection/recognition
   config.grab_mode = CAMERA_GRAB_WHEN_EMPTY;
   config.fb_location = CAMERA_FB_IN_PSRAM;
-  config.jpeg_quality = 12;
+  config.jpeg_quality = 4;
   config.fb_count = 1;
 
   // if PSRAM IC present, init with UXGA resolution and higher JPEG quality
   //                      for larger pre-allocated frame buffer.
   if (config.pixel_format == PIXFORMAT_JPEG) {
     if (psramFound()) {
-      config.jpeg_quality = 10;
+      config.jpeg_quality = 4;
       config.fb_count = 2;
       config.grab_mode = CAMERA_GRAB_LATEST;
     } else {
@@ -164,7 +164,7 @@ void setup() {
   }
   // drop down frame size for higher initial frame rate
   if (config.pixel_format == PIXFORMAT_JPEG) {
-    s->set_framesize(s, FRAMESIZE_QVGA);
+    s->set_framesize(s, FRAMESIZE_SVGA);
   }
 
 #if defined(CAMERA_MODEL_M5STACK_WIDE) || defined(CAMERA_MODEL_M5STACK_ESP32CAM)

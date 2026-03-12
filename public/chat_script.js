@@ -1460,9 +1460,44 @@ async function executeReadVariable(name, incomingMessageDiv) {
     }
 }
 
+function coerceWriteVariableInput(value) {
+    if (typeof value !== "string") return value;
+    const trimmed = value.trim();
+    if (!trimmed) return "";
+
+    if (/^[-+]?\d+(?:\.\d+)?$/.test(trimmed)) {
+        const numeric = Number(trimmed);
+        if (Number.isFinite(numeric)) return numeric;
+    }
+    if (/^(true|false)$/i.test(trimmed)) {
+        return trimmed.toLowerCase() === "true";
+    }
+    if (/^null$/i.test(trimmed)) {
+        return null;
+    }
+    if (
+        (trimmed.startsWith("{") && trimmed.endsWith("}")) ||
+        (trimmed.startsWith("[") && trimmed.endsWith("]"))
+    ) {
+        try {
+            return JSON.parse(trimmed);
+        } catch (error) {
+            return value;
+        }
+    }
+    if (
+        (trimmed.startsWith("\"") && trimmed.endsWith("\"")) ||
+        (trimmed.startsWith("'") && trimmed.endsWith("'"))
+    ) {
+        return trimmed.slice(1, -1);
+    }
+    return value;
+}
+
 async function executeWriteVariable(name, value, incomingMessageDiv, meta = {}) {
     const variableName = String(name || "").trim();
     if (!variableName) return "Write variable failed: name is required.";
+    const normalizedWriteValue = coerceWriteVariableInput(value);
 
     const messageElement = incomingMessageDiv.querySelector(".message-text");
     const writeBox = document.createElement("div");
@@ -1487,7 +1522,7 @@ async function executeWriteVariable(name, value, incomingMessageDiv, meta = {}) 
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
                 name: variableName,
-                value,
+                value: normalizedWriteValue,
                 sourceMacroId: meta?.sourceMacroId || "",
                 sourceMacroName: meta?.sourceMacroName || ""
             })

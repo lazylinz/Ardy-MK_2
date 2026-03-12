@@ -10,9 +10,9 @@ const faceAlertLayerEl = document.getElementById("face-alert-layer");
 
 const FACE_MODEL_URI = "https://cdn.jsdelivr.net/npm/@vladmandic/face-api/model/";
 const FACE_SCAN_INTERVAL_MS = 1800;
-const FACE_MATCH_ALERT_COOLDOWN_MS = 60000;
-const FACE_UNKNOWN_ALERT_COOLDOWN_MS = 25000;
 const FACE_BATCH_LIMIT = 5;
+const FACE_NEW_PERSON_THRESHOLD = 0.52;
+const FACE_MAX_TRACKED = 150;
 
 let snapshotTimer = null;
 let faceScanTimer = null;
@@ -24,7 +24,8 @@ const monitorState = {
   modelsReady: false,
   modelsLoading: null,
   activeNotification: null,
-  recentAlerts: new Map()
+  trackedFaces: [],
+  nextFaceId: 1
 };
 
 function setStatus(text) {
@@ -111,23 +112,71 @@ async function ensureFaceModelsReady() {
     faceapi.nets.faceRecognitionNet.loadFromUri(FACE_MODEL_URI)
   ]).then(() => {
     monitorState.modelsReady = true;
-  });
+h  });
 
   await monitorState.modelsLoading;
 }
 
-function descriptorFingerprint(descriptor) {
-  if (!Array.isArray(descriptor)) return `unknown-${Date.now()}`;
-  const sample = descriptor.slice(0, 24);
-  return sample.map((value) => Math.round(Number(value) * 20)).join(":");
+function faceDistance(descriptorA, descriptorB) {
+  if (!Array.isArray(descriptorA) || !Array.isArray(descriptorB)) return Number.POSITIVE_INFINITY;
+  const dimensions = Math.min(descriptorA.length, descriptorB.length);
+  if (dimensions < 32) return Number.POSITIVE_INFINITY;
+  let sum = 0;
+  for (let i = 0; i < dimensions; i += 1) {
+    const delta = Number(descriptorA[i]) - Number(descriptorB[i]);
+    sum += delta * delta;
+  }
+  return Math.sqrt(sum);
 }
 
-function shouldAlertNow(alertKey, cooldownMs) {
+function getBestTrackedFaceMatch(descriptor) {
+  let best = null;
+  for (const tracked of monitorState.trackedFaces) {
+    const distance = faceDistance(descriptor, tracked.descriptor);
+    if (!best || distance < best.distance) {
+      best = { tracked, distance };
+    }
+  }
+  if (!best) return null;
+  if (!Number.isFinite(best.distance) || best.distance > FACE_NEW_PERSON_THRESHOLD) return null;
+  return best;
+}
+
+function registerFace(descriptor) {
   const now = Date.now();
-  const lastAlertAt = Number(monitorState.recentAlerts.get(alertKey) || 0);
-  if (now - lastAlertAt < cooldownMs) return false;
-  monitorState.recentAlerts.set(alertKey, now);
-  return true;
+  const bestMatch = getBestTrackedFaceMatch(descriptor);
+  if (bestMatch) {
+    bestMatch.tracked.lastSeenAt = now;
+    bestMatch.tracked.seenCount += 1;
+    return {
+      isNew: false,
+      faceId: bestMatch.tracked.id,
+      distance: bestMatch.distance
+    };
+  }
+
+  const entry = {
+    id: monitorState.nextFaceId,
+    descriptor: descriptor.slice(0, 256),
+    firstSeenAt: now,
+    lastSeenAt: now,
+    seenCount: 1
+  };
+  monitorState.nextFaceId += 1;
+  monitorState.trackedFaces.push(entry);
+
+  if (monitorState.trackedFaces.length > FACE_MAX_TRACKED) {
+    monitorState.trackedFaces.sort((a, b) => Number(a.lastSeenAt || 0) - Number(b.lastSeenAt || 0));
+    monitorState.trackedFaces = monitorState.trackedFaces.slice(
+      monitorState.trackedFaces.length - FACE_MAX_TRACKED
+    );
+  }
+
+  return {
+    isNew: true,
+    faceId: entry.id,
+    distance: null
+  };
 }
 
 function playAlertSound() {
@@ -165,10 +214,10 @@ function playAlertSound() {
   }
 }
 
-function showFaceToast({ title, message, isUnknown = false }) {
+function showFaceToast({ title, message }) {
   if (!faceAlertLayerEl) return;
   const toast = document.createElement("div");
-  toast.className = `face-alert-toast${isUnknown ? " unknown" : ""}`;
+  toast.className = "face-alert-toast";
 
   const titleEl = document.createElement("div");
   titleEl.className = "face-alert-title";
@@ -203,15 +252,12 @@ function notifyOffsite({ title, body }) {
   }
 }
 
-function fireFaceAlert({ label, distance, isUnknown = false }) {
-  const certaintyText = Number.isFinite(distance)
-    ? ` (distance ${distance.toFixed(3)})`
-    : "";
-  const title = isUnknown ? "Unknown person detected" : "Known face detected";
-  const message = isUnknown ? "Unknown person is on camera." : `${label} is on camera${certaintyText}`;
+function fireFaceAlert({ faceId }) {
+  const title = "New face detected";
+  const message = `Face #${faceId} appeared on camera.`;
 
   if (document.visibilityState === "visible" && document.hasFocus()) {
-    showFaceToast({ title, message, isUnknown });
+    showFaceToast({ title, message });
     playAlertSound();
     return;
   }
@@ -220,19 +266,6 @@ function fireFaceAlert({ label, distance, isUnknown = false }) {
     title: "Ardy Camera Alert",
     body: message
   });
-}
-
-async function requestMatchBatch(descriptors) {
-  const response = await fetch("/api/faces/match-batch", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ descriptors })
-  });
-  const payload = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    throw new Error(payload?.error?.message || "Face matching request failed.");
-  }
-  return payload;
 }
 
 async function runFaceMonitorTick() {
@@ -266,43 +299,17 @@ async function runFaceMonitorTick() {
       return;
     }
 
-    const payload = await requestMatchBatch(descriptors);
-    const results = Array.isArray(payload?.matches) ? payload.matches : [];
-    const nowSeen = new Set();
-    let matchCount = 0;
-
-    for (let i = 0; i < results.length; i += 1) {
-      const result = results[i] || {};
-      const descriptor = descriptors[i];
-      const isMatched = Boolean(result.matched && result.userId);
-
-      if (isMatched) {
-        matchCount += 1;
-        const key = `user:${result.userId}`;
-        if (nowSeen.has(key)) continue;
-        nowSeen.add(key);
-        if (!shouldAlertNow(key, FACE_MATCH_ALERT_COOLDOWN_MS)) continue;
-
-        fireFaceAlert({
-          label: String(result.nickname || result.userId),
-          distance: Number(result.distance),
-          isUnknown: false
-        });
-        continue;
-      }
-
-      const unknownKey = `unknown:${descriptorFingerprint(descriptor)}`;
-      if (nowSeen.has(unknownKey)) continue;
-      nowSeen.add(unknownKey);
-      if (!shouldAlertNow(unknownKey, FACE_UNKNOWN_ALERT_COOLDOWN_MS)) continue;
-      fireFaceAlert({
-        label: "Unknown",
-        distance: Number(result.distance),
-        isUnknown: true
-      });
+    let newFaceCount = 0;
+    for (const descriptor of descriptors) {
+      const registration = registerFace(descriptor);
+      if (!registration.isNew) continue;
+      newFaceCount += 1;
+      fireFaceAlert({ faceId: registration.faceId });
     }
 
-    setFaceMonitorStatus(`Face monitor active: ${detections.length} face(s), ${matchCount} known match(es).`);
+    setFaceMonitorStatus(
+      `Face monitor active: ${detections.length} face(s), ${newFaceCount} new, ${monitorState.trackedFaces.length} tracked.`
+    );
   } catch (error) {
     setFaceMonitorStatus(`Face monitor error: ${error.message}`, true);
   } finally {
