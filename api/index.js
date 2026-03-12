@@ -71,9 +71,10 @@ const CORS_ALLOWLIST = String(process.env.CORS_ALLOWLIST || '')
     .filter(Boolean);
 const QUICK_SIGNIN_TTL_MS = 5 * 60 * 1000;
 const PASSWORD_GATE_TTL_MS = 10 * 60 * 1000;
-const FACE_MATCH_THRESHOLD = Number(process.env.FACE_MATCH_THRESHOLD || 0.4);
-const FACE_MATCH_ANGLE_THRESHOLD = Number(process.env.FACE_MATCH_ANGLE_THRESHOLD || 0.43);
-const FACE_MATCH_AMBIGUITY_MARGIN = Number(process.env.FACE_MATCH_AMBIGUITY_MARGIN || 0.02);
+const FACE_MATCH_THRESHOLD = Number(process.env.FACE_MATCH_THRESHOLD || 0.42);
+const FACE_MATCH_ANGLE_THRESHOLD = Number(process.env.FACE_MATCH_ANGLE_THRESHOLD || 0.47);
+const FACE_MATCH_MODEL_THRESHOLD = Number(process.env.FACE_MATCH_MODEL_THRESHOLD || 0.45);
+const FACE_MATCH_AMBIGUITY_MARGIN = Number(process.env.FACE_MATCH_AMBIGUITY_MARGIN || 0.015);
 const HOSTED_IMAGE_TTL_MS = 15 * 60 * 1000;
 const HOSTED_IMAGE_MAX_BYTES = 6 * 1024 * 1024;
 const HOSTED_IMAGE_MAX_ITEMS = 300;
@@ -691,11 +692,98 @@ function averageFaceDescriptors(descriptors) {
     return sanitizeFaceDescriptor(avg);
 }
 
+function subtractDescriptors(left, right) {
+    const a = sanitizeFaceDescriptor(left);
+    const b = sanitizeFaceDescriptor(right);
+    if (!a || !b) return null;
+    const dims = Math.min(a.length, b.length);
+    if (dims < 32) return null;
+    const out = new Array(dims);
+    for (let i = 0; i < dims; i += 1) {
+        out[i] = Number(a[i]) - Number(b[i]);
+    }
+    return sanitizeFaceDescriptor(out);
+}
+
+function buildFaceModel3d(descriptorMap, fallbackDescriptor) {
+    const map = descriptorMap && typeof descriptorMap === 'object' ? descriptorMap : {};
+    const front = sanitizeFaceDescriptor(map.front);
+    const left = sanitizeFaceDescriptor(map.left);
+    const right = sanitizeFaceDescriptor(map.right);
+    const center = front || sanitizeFaceDescriptor(fallbackDescriptor);
+    if (!center) return null;
+
+    const leftDelta = left && center ? subtractDescriptors(left, center) : null;
+    const rightDelta = right && center ? subtractDescriptors(right, center) : null;
+
+    return {
+        center,
+        leftDelta,
+        rightDelta
+    };
+}
+
+function averageFinite(values) {
+    const clean = values.filter((value) => Number.isFinite(value));
+    if (!clean.length) return null;
+    return clean.reduce((sum, value) => sum + value, 0) / clean.length;
+}
+
+function computeAngleAlignment(incomingAngles, profileAngles) {
+    const direct = [];
+    if (incomingAngles.front && profileAngles.front) {
+        direct.push(faceDistance(incomingAngles.front, profileAngles.front));
+    }
+    if (incomingAngles.left && profileAngles.left) {
+        direct.push(faceDistance(incomingAngles.left, profileAngles.left));
+    }
+    if (incomingAngles.right && profileAngles.right) {
+        direct.push(faceDistance(incomingAngles.right, profileAngles.right));
+    }
+
+    const mirrored = [];
+    if (incomingAngles.front && profileAngles.front) {
+        mirrored.push(faceDistance(incomingAngles.front, profileAngles.front));
+    }
+    if (incomingAngles.left && profileAngles.right) {
+        mirrored.push(faceDistance(incomingAngles.left, profileAngles.right));
+    }
+    if (incomingAngles.right && profileAngles.left) {
+        mirrored.push(faceDistance(incomingAngles.right, profileAngles.left));
+    }
+
+    const directMean = averageFinite(direct);
+    const mirroredMean = averageFinite(mirrored);
+    const useMirrored = Number.isFinite(mirroredMean) && (!Number.isFinite(directMean) || mirroredMean < directMean);
+    const chosen = useMirrored ? mirrored : direct;
+    const chosenMean = useMirrored ? mirroredMean : directMean;
+    const sorted = chosen.filter((value) => Number.isFinite(value)).sort((a, b) => a - b);
+
+    return {
+        mirrored: useMirrored,
+        distances: sorted,
+        mean: chosenMean,
+        max: sorted.length ? sorted[sorted.length - 1] : null,
+        count: sorted.length,
+        strongCount: sorted.filter((value) => value <= FACE_MATCH_ANGLE_THRESHOLD).length
+    };
+}
+
+function computeModelDistance(incomingModel, profileModel) {
+    if (!incomingModel || !profileModel) return null;
+    const distances = [
+        faceDistance(incomingModel.center, profileModel.center),
+        faceDistance(incomingModel.leftDelta, profileModel.leftDelta),
+        faceDistance(incomingModel.rightDelta, profileModel.rightDelta)
+    ].filter((value) => Number.isFinite(value));
+    return averageFinite(distances);
+}
+
 function sanitizeIncomingFaceScan(rawValue) {
     if (Array.isArray(rawValue)) {
         const descriptor = sanitizeFaceDescriptor(rawValue);
         if (!descriptor) return null;
-        return { faceDescriptor: descriptor, faceDescriptors: null };
+        return { faceDescriptor: descriptor, faceDescriptors: null, faceModel3d: buildFaceModel3d(null, descriptor) };
     }
 
     if (!rawValue || typeof rawValue !== 'object') return null;
@@ -703,7 +791,7 @@ function sanitizeIncomingFaceScan(rawValue) {
     const singleDescriptor = sanitizeFaceDescriptor(rawValue.descriptor || rawValue.faceDescriptor);
     const descriptor = singleDescriptor || averageFaceDescriptors(descriptorMap ? Object.values(descriptorMap) : []);
     if (!descriptor) return null;
-    return { faceDescriptor: descriptor, faceDescriptors: descriptorMap };
+    return { faceDescriptor: descriptor, faceDescriptors: descriptorMap, faceModel3d: buildFaceModel3d(descriptorMap, descriptor) };
 }
 
 function sanitizeNickname(rawNickname) {
@@ -728,58 +816,52 @@ function faceDistance(descriptorA, descriptorB) {
 
 function buildFaceCandidateMetrics(incomingScan, profile) {
     const aggregateDistance = faceDistance(incomingScan.faceDescriptor, profile.faceDescriptor);
-    const angleDistances = [];
     const incomingAngles = incomingScan.faceDescriptors || {};
     const profileAngles = profile.faceDescriptors || {};
     const incomingAngleCount = Object.keys(incomingAngles).length;
     const profileAngleCount = Object.keys(profileAngles).length;
+    const angleAlignment = computeAngleAlignment(incomingAngles, profileAngles);
+    const modelDistance = computeModelDistance(incomingScan.faceModel3d, profile.faceModel3d);
+    const weightedParts = [];
+    if (Number.isFinite(aggregateDistance)) weightedParts.push({ weight: 0.45, value: aggregateDistance });
+    if (Number.isFinite(angleAlignment.mean)) weightedParts.push({ weight: 0.35, value: angleAlignment.mean });
+    if (Number.isFinite(modelDistance)) weightedParts.push({ weight: 0.2, value: modelDistance });
+    const weightTotal = weightedParts.reduce((sum, item) => sum + item.weight, 0) || 1;
+    const combinedDistance = weightedParts.reduce((sum, item) => sum + (item.weight * item.value), 0) / weightTotal;
 
-    for (const angle of FACE_CAPTURE_ANGLES) {
-        if (!incomingAngles[angle] || !profileAngles[angle]) continue;
-        angleDistances.push(faceDistance(incomingAngles[angle], profileAngles[angle]));
-    }
-
-    if (!angleDistances.length) {
-        return {
-            distance: aggregateDistance,
-            aggregateDistance,
-            angleDistances,
-            angleCount: 0,
-            angleMeanDistance: null,
-            angleMaxDistance: null,
-            strongAngleCount: 0,
-            incomingAngleCount,
-            profileAngleCount
-        };
-    }
-
-    const sorted = angleDistances.slice().sort((a, b) => a - b);
-    const mean = sorted.reduce((sum, value) => sum + value, 0) / sorted.length;
-    const max = sorted[sorted.length - 1];
-    const strongAngleCount = sorted.filter((value) => value <= FACE_MATCH_ANGLE_THRESHOLD).length;
-    const combinedDistance = (aggregateDistance * 0.35) + (mean * 0.65);
     return {
         distance: combinedDistance,
         aggregateDistance,
-        angleDistances,
-        angleCount: angleDistances.length,
-        angleMeanDistance: mean,
-        angleMaxDistance: max,
-        strongAngleCount,
+        angleDistances: angleAlignment.distances,
+        angleCount: angleAlignment.count,
+        angleMeanDistance: angleAlignment.mean,
+        angleMaxDistance: angleAlignment.max,
+        strongAngleCount: angleAlignment.strongCount,
+        modelDistance,
+        mirroredAlignment: angleAlignment.mirrored,
         incomingAngleCount,
         profileAngleCount
     };
 }
 
 function isFaceCandidateAccepted(candidate) {
-    if (candidate.incomingAngleCount >= 3 && candidate.profileAngleCount < 3) return false;
+    if (candidate.incomingAngleCount >= 3 && candidate.profileAngleCount < 3) {
+        const legacyThreshold = Math.max(0.3, FACE_MATCH_THRESHOLD - 0.06);
+        return Number.isFinite(candidate.distance)
+            && Number.isFinite(candidate.aggregateDistance)
+            && candidate.distance <= legacyThreshold
+            && candidate.aggregateDistance <= legacyThreshold;
+    }
     if (!Number.isFinite(candidate.distance) || candidate.distance > FACE_MATCH_THRESHOLD) return false;
     if (!Number.isFinite(candidate.aggregateDistance) || candidate.aggregateDistance > FACE_MATCH_THRESHOLD) return false;
 
     if (candidate.angleCount >= 2) {
         if (!Number.isFinite(candidate.angleMeanDistance) || candidate.angleMeanDistance > FACE_MATCH_ANGLE_THRESHOLD) return false;
         if (!Number.isFinite(candidate.angleMaxDistance) || candidate.angleMaxDistance > (FACE_MATCH_ANGLE_THRESHOLD + 0.03)) return false;
-        if (candidate.strongAngleCount < Math.min(3, candidate.angleCount)) return false;
+        if (candidate.strongAngleCount < Math.min(2, candidate.angleCount)) return false;
+    }
+    if (Number.isFinite(candidate.modelDistance) && candidate.modelDistance > FACE_MATCH_MODEL_THRESHOLD) {
+        return false;
     }
     return true;
 }
@@ -807,12 +889,14 @@ function readFaceProfileStore() {
                     const descriptorMap = sanitizeFaceDescriptorMap(entry?.faceDescriptors || entry?.descriptorsByAngle);
                     const descriptor = sanitizeFaceDescriptor(entry?.faceDescriptor)
                         || averageFaceDescriptors(descriptorMap ? Object.values(descriptorMap) : []);
+                    const faceModel3d = buildFaceModel3d(descriptorMap, descriptor);
                     if (!id || !nickname || !descriptor) return null;
                     return {
                         id,
                         nickname,
                         faceDescriptor: descriptor,
                         faceDescriptors: descriptorMap,
+                        faceModel3d,
                         createdAt: Number.isFinite(Number(entry?.createdAt)) ? Number(entry.createdAt) : Date.now(),
                         updatedAt: Number.isFinite(Number(entry?.updatedAt)) ? Number(entry.updatedAt) : Date.now(),
                         lastSeenAt: Number.isFinite(Number(entry?.lastSeenAt)) ? Number(entry.lastSeenAt) : null
@@ -999,6 +1083,7 @@ app.post('/login/enroll', (req, res) => {
         nickname,
         faceDescriptor: faceScan.faceDescriptor,
         faceDescriptors: faceScan.faceDescriptors,
+        faceModel3d: faceScan.faceModel3d,
         createdAt: now,
         updatedAt: now,
         lastSeenAt: now
