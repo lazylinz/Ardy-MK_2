@@ -72,6 +72,7 @@ const CORS_ALLOWLIST = String(process.env.CORS_ALLOWLIST || '')
 const QUICK_SIGNIN_TTL_MS = 5 * 60 * 1000;
 const PASSWORD_GATE_TTL_MS = 10 * 60 * 1000;
 const FACE_MATCH_THRESHOLD = Number(process.env.FACE_MATCH_THRESHOLD || 0.47);
+const FACE_MATCH_SUBTLE_MARGIN = Number(process.env.FACE_MATCH_SUBTLE_MARGIN || 0.06);
 const HOSTED_IMAGE_TTL_MS = 15 * 60 * 1000;
 const HOSTED_IMAGE_MAX_BYTES = 6 * 1024 * 1024;
 const HOSTED_IMAGE_MAX_ITEMS = 300;
@@ -656,6 +657,54 @@ function sanitizeFaceDescriptor(rawDescriptor) {
     return normalized.slice(0, 256);
 }
 
+const FACE_CAPTURE_ANGLES = ['front', 'left', 'right'];
+
+function sanitizeFaceDescriptorMap(rawDescriptorMap) {
+    if (!rawDescriptorMap || typeof rawDescriptorMap !== 'object' || Array.isArray(rawDescriptorMap)) return null;
+    const out = {};
+    for (const angle of FACE_CAPTURE_ANGLES) {
+        const descriptor = sanitizeFaceDescriptor(rawDescriptorMap[angle]);
+        if (descriptor) out[angle] = descriptor;
+    }
+    return Object.keys(out).length ? out : null;
+}
+
+function averageFaceDescriptors(descriptors) {
+    if (!Array.isArray(descriptors) || descriptors.length === 0) return null;
+    const normalized = descriptors
+        .map((descriptor) => sanitizeFaceDescriptor(descriptor))
+        .filter(Boolean);
+    if (!normalized.length) return null;
+
+    const dims = Math.min(...normalized.map((descriptor) => descriptor.length));
+    if (!Number.isFinite(dims) || dims < 32) return null;
+    const avg = new Array(dims).fill(0);
+    for (const descriptor of normalized) {
+        for (let i = 0; i < dims; i += 1) {
+            avg[i] += Number(descriptor[i] || 0);
+        }
+    }
+    for (let i = 0; i < dims; i += 1) {
+        avg[i] /= normalized.length;
+    }
+    return sanitizeFaceDescriptor(avg);
+}
+
+function sanitizeIncomingFaceScan(rawValue) {
+    if (Array.isArray(rawValue)) {
+        const descriptor = sanitizeFaceDescriptor(rawValue);
+        if (!descriptor) return null;
+        return { faceDescriptor: descriptor, faceDescriptors: null };
+    }
+
+    if (!rawValue || typeof rawValue !== 'object') return null;
+    const descriptorMap = sanitizeFaceDescriptorMap(rawValue.descriptorsByAngle || rawValue.faceDescriptors || rawValue);
+    const singleDescriptor = sanitizeFaceDescriptor(rawValue.descriptor || rawValue.faceDescriptor);
+    const descriptor = singleDescriptor || averageFaceDescriptors(descriptorMap ? Object.values(descriptorMap) : []);
+    if (!descriptor) return null;
+    return { faceDescriptor: descriptor, faceDescriptors: descriptorMap };
+}
+
 function sanitizeNickname(rawNickname) {
     const cleaned = String(rawNickname || '')
         .replace(/\s+/g, ' ')
@@ -674,6 +723,49 @@ function faceDistance(descriptorA, descriptorB) {
         sum += delta * delta;
     }
     return Math.sqrt(sum);
+}
+
+function buildFaceCandidateMetrics(incomingScan, profile) {
+    const aggregateDistance = faceDistance(incomingScan.faceDescriptor, profile.faceDescriptor);
+    const angleDistances = [];
+    const incomingAngles = incomingScan.faceDescriptors || {};
+    const profileAngles = profile.faceDescriptors || {};
+
+    for (const angle of FACE_CAPTURE_ANGLES) {
+        if (!incomingAngles[angle] || !profileAngles[angle]) continue;
+        angleDistances.push(faceDistance(incomingAngles[angle], profileAngles[angle]));
+    }
+
+    if (!angleDistances.length) {
+        return {
+            distance: aggregateDistance,
+            aggregateDistance,
+            angleDistances,
+            angleCount: 0
+        };
+    }
+
+    const sorted = angleDistances.slice().sort((a, b) => a - b);
+    const median = sorted[Math.floor(sorted.length / 2)];
+    const combinedDistance = (aggregateDistance * 0.45) + (median * 0.55);
+    return {
+        distance: Math.min(combinedDistance, aggregateDistance),
+        aggregateDistance,
+        angleDistances,
+        angleCount: angleDistances.length
+    };
+}
+
+function isFaceCandidateAccepted(candidate) {
+    const dynamicThreshold = FACE_MATCH_THRESHOLD + (candidate.angleCount > 0 ? FACE_MATCH_SUBTLE_MARGIN : 0);
+    if (!Number.isFinite(candidate.distance) || candidate.distance > dynamicThreshold) return false;
+
+    if (candidate.angleCount >= 2) {
+        const looseAngleThreshold = dynamicThreshold + 0.04;
+        const strongAngles = candidate.angleDistances.filter((distance) => Number.isFinite(distance) && distance <= looseAngleThreshold).length;
+        if (strongAngles < 2) return false;
+    }
+    return true;
 }
 
 function ensureFaceProfileStoreFile() {
@@ -696,12 +788,15 @@ function readFaceProfileStore() {
                 .map((entry) => {
                     const id = String(entry?.id || '').trim();
                     const nickname = sanitizeNickname(entry?.nickname);
-                    const descriptor = sanitizeFaceDescriptor(entry?.faceDescriptor);
+                    const descriptorMap = sanitizeFaceDescriptorMap(entry?.faceDescriptors || entry?.descriptorsByAngle);
+                    const descriptor = sanitizeFaceDescriptor(entry?.faceDescriptor)
+                        || averageFaceDescriptors(descriptorMap ? Object.values(descriptorMap) : []);
                     if (!id || !nickname || !descriptor) return null;
                     return {
                         id,
                         nickname,
                         faceDescriptor: descriptor,
+                        faceDescriptors: descriptorMap,
                         createdAt: Number.isFinite(Number(entry?.createdAt)) ? Number(entry.createdAt) : Date.now(),
                         updatedAt: Number.isFinite(Number(entry?.updatedAt)) ? Number(entry.updatedAt) : Date.now(),
                         lastSeenAt: Number.isFinite(Number(entry?.lastSeenAt)) ? Number(entry.lastSeenAt) : null
@@ -742,20 +837,23 @@ function isLocalOrHttpRequest(req) {
 function findBestFaceMatch(inputDescriptor) {
     const bestMatch = findBestFaceCandidate(inputDescriptor);
     if (!bestMatch) return null;
-    if (bestMatch.distance > FACE_MATCH_THRESHOLD) return null;
+    if (!isFaceCandidateAccepted(bestMatch)) return null;
     return bestMatch;
 }
 
 function findBestFaceCandidate(inputDescriptor) {
-    const descriptor = sanitizeFaceDescriptor(inputDescriptor);
-    if (!descriptor) return null;
+    const incomingScan = sanitizeIncomingFaceScan(inputDescriptor);
+    if (!incomingScan) return null;
 
     const store = readFaceProfileStore();
     let bestMatch = null;
     for (const user of store.users) {
-        const distance = faceDistance(descriptor, user.faceDescriptor);
-        if (!bestMatch || distance < bestMatch.distance) {
-            bestMatch = { user, distance };
+        const metrics = buildFaceCandidateMetrics(incomingScan, user);
+        if (!bestMatch || metrics.distance < bestMatch.distance) {
+            bestMatch = {
+                user,
+                ...metrics
+            };
         }
     }
     return bestMatch;
@@ -804,12 +902,12 @@ app.post('/login', (req, res) => {
 });
 
 app.post('/login/face', (req, res) => {
-    const descriptor = sanitizeFaceDescriptor(req.body?.descriptor);
-    if (!descriptor) {
+    const faceScan = sanitizeIncomingFaceScan(req.body);
+    if (!faceScan) {
         return res.status(400).json({ success: false, message: 'Face descriptor is invalid.' });
     }
 
-    const bestMatch = findBestFaceMatch(descriptor);
+    const bestMatch = findBestFaceMatch(faceScan);
     if (!bestMatch) {
         return res.status(404).json({
             success: false,
@@ -828,7 +926,7 @@ app.post('/login/face', (req, res) => {
 });
 
 app.post('/login/enroll', (req, res) => {
-    const descriptor = sanitizeFaceDescriptor(req.body?.descriptor);
+    const faceScan = sanitizeIncomingFaceScan(req.body);
     const nickname = sanitizeNickname(req.body?.nickname);
     const password = String(req.body?.password || '');
     const isPasswordAllowed = password === PASSWORD || hasRecentPasswordVerification(req);
@@ -839,8 +937,16 @@ app.post('/login/enroll', (req, res) => {
             message: 'Password verification required before enrollment.'
         });
     }
-    if (!descriptor) {
+    if (!faceScan?.faceDescriptor) {
         return res.status(400).json({ success: false, message: 'Face descriptor is invalid.' });
+    }
+    const angleMap = faceScan.faceDescriptors || {};
+    const hasThreeViewScan = FACE_CAPTURE_ANGLES.every((angle) => Boolean(angleMap[angle]));
+    if (!hasThreeViewScan) {
+        return res.status(400).json({
+            success: false,
+            message: 'Enrollment requires a 3-step scan: front, left, and right views.'
+        });
     }
     if (!nickname || !/^[A-Za-z0-9 _.-]{2,32}$/.test(nickname)) {
         return res.status(400).json({
@@ -849,7 +955,7 @@ app.post('/login/enroll', (req, res) => {
         });
     }
 
-    const existing = findBestFaceMatch(descriptor);
+    const existing = findBestFaceMatch(faceScan);
     if (existing) {
         return res.status(409).json({
             success: false,
@@ -865,7 +971,8 @@ app.post('/login/enroll', (req, res) => {
     store.users.push({
         id: userId,
         nickname,
-        faceDescriptor: descriptor,
+        faceDescriptor: faceScan.faceDescriptor,
+        faceDescriptors: faceScan.faceDescriptors,
         createdAt: now,
         updatedAt: now,
         lastSeenAt: now
@@ -1001,8 +1108,8 @@ app.post('/api/faces/match-batch', requireWhitelistedIp, requireAuth, (req, res)
     }
 
     const matches = descriptors.map((rawDescriptor, index) => {
-        const descriptor = sanitizeFaceDescriptor(rawDescriptor);
-        if (!descriptor) {
+        const faceScan = sanitizeIncomingFaceScan(rawDescriptor);
+        if (!faceScan) {
             return {
                 index,
                 matched: false,
@@ -1010,13 +1117,14 @@ app.post('/api/faces/match-batch', requireWhitelistedIp, requireAuth, (req, res)
             };
         }
 
-        const candidate = findBestFaceCandidate(descriptor);
-        const isMatch = Boolean(candidate && Number.isFinite(candidate.distance) && candidate.distance <= FACE_MATCH_THRESHOLD);
+        const candidate = findBestFaceCandidate(faceScan);
+        const isMatch = Boolean(candidate && isFaceCandidateAccepted(candidate));
+        const dynamicThreshold = FACE_MATCH_THRESHOLD + (candidate?.angleCount > 0 ? FACE_MATCH_SUBTLE_MARGIN : 0);
         return {
             index,
             matched: isMatch,
             distance: candidate?.distance ?? null,
-            threshold: FACE_MATCH_THRESHOLD,
+            threshold: dynamicThreshold,
             userId: isMatch ? candidate.user.id : null,
             nickname: isMatch ? candidate.user.nickname : null
         };

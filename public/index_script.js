@@ -15,14 +15,37 @@ const nicknameInput = document.getElementById('nickname');
 const enrollBtn = document.getElementById('enrollBtn');
 
 const FACE_MODEL_URI = 'https://cdn.jsdelivr.net/npm/@vladmandic/face-api/model/';
-const FACE_SAMPLES_REQUIRED = 3;
-const FACE_SCAN_MAX_ATTEMPTS = 40;
+const FACE_SCAN_STEPS = [
+  {
+    key: 'front',
+    label: 'Front view',
+    prompt: 'Look straight at the camera.',
+    validateYaw: (yaw) => Math.abs(yaw) <= 0.1,
+    guidance: 'Keep your face centered and look straight.'
+  },
+  {
+    key: 'left',
+    label: 'Left side view',
+    prompt: 'Turn slightly to your LEFT.',
+    validateYaw: (yaw) => yaw <= -0.13,
+    guidance: 'Turn your head more to your LEFT (or the opposite if your preview feels mirrored).'
+  },
+  {
+    key: 'right',
+    label: 'Right side view',
+    prompt: 'Turn slightly to your RIGHT.',
+    validateYaw: (yaw) => yaw >= 0.13,
+    guidance: 'Turn your head more to your RIGHT (or the opposite if your preview feels mirrored).'
+  }
+];
+const FACE_SAMPLES_PER_STEP = 4;
+const FACE_SCAN_MAX_ATTEMPTS = 56;
 const FACE_SCAN_INTERVAL_MS = 220;
 
 const state = {
   mode: 'password',
   afterPasswordGate: false,
-  descriptor: null,
+  faceScan: null,
   stream: null,
   cameraStarting: null,
   scanInProgress: false,
@@ -75,8 +98,8 @@ function setStage(stage) {
     stopCamera();
   } else if (isFace) {
     stageSubtitle.textContent = state.afterPasswordGate
-      ? 'Face scan required. If new, create your nickname next.'
-      : 'Position your face inside the frame to continue.';
+      ? '3-step face scan required: front, left, right. If new, create your nickname next.'
+      : 'Run a 3-step face scan: front, left, right.';
     startCamera().catch((err) => {
       setMessage(`Camera error: ${err.message}`, 'error');
     });
@@ -164,6 +187,7 @@ function stopCamera() {
 }
 
 function averageDescriptors(descriptors) {
+  if (!Array.isArray(descriptors) || descriptors.length === 0) return null;
   const length = descriptors[0].length;
   const avg = new Array(length).fill(0);
 
@@ -178,7 +202,34 @@ function averageDescriptors(descriptors) {
   return avg;
 }
 
-async function captureFaceDescriptor() {
+function averagePoint(points = []) {
+  if (!Array.isArray(points) || points.length === 0) return { x: 0, y: 0 };
+  let x = 0;
+  let y = 0;
+  for (const point of points) {
+    x += Number(point?.x || 0);
+    y += Number(point?.y || 0);
+  }
+  return { x: x / points.length, y: y / points.length };
+}
+
+function estimateYaw(landmarks) {
+  if (!landmarks || typeof landmarks.getLeftEye !== 'function' || typeof landmarks.getRightEye !== 'function' || typeof landmarks.getNose !== 'function') {
+    return null;
+  }
+  const leftEye = averagePoint(landmarks.getLeftEye());
+  const rightEye = averagePoint(landmarks.getRightEye());
+  const nose = landmarks.getNose();
+  const noseTip = nose?.[3] || nose?.[0];
+  if (!noseTip) return null;
+
+  const eyeDistance = Math.abs(rightEye.x - leftEye.x);
+  if (!Number.isFinite(eyeDistance) || eyeDistance < 1) return null;
+  const eyeMidX = (leftEye.x + rightEye.x) / 2;
+  return (noseTip.x - eyeMidX) / eyeDistance;
+}
+
+async function captureFaceStep(step, index, totalSteps) {
   await loadFaceModels();
   await startCamera();
 
@@ -187,8 +238,10 @@ async function captureFaceDescriptor() {
     scoreThreshold: 0.5
   });
 
-  const descriptors = [];
-  let misses = 0;
+  const samples = [];
+  let noFaceCount = 0;
+  let poseMissCount = 0;
+  setMessage(`Step ${index}/${totalSteps}: ${step.label}. ${step.prompt}`, 'ok');
 
   for (let attempt = 0; attempt < FACE_SCAN_MAX_ATTEMPTS; attempt += 1) {
     const detection = await faceapi
@@ -196,31 +249,58 @@ async function captureFaceDescriptor() {
       .withFaceLandmarks()
       .withFaceDescriptor();
 
-    if (detection?.descriptor) {
-      descriptors.push(Array.from(detection.descriptor));
-      setMessage(`Face detected (${descriptors.length}/${FACE_SAMPLES_REQUIRED})... hold still`, 'ok');
-      if (descriptors.length >= FACE_SAMPLES_REQUIRED) {
-        return averageDescriptors(descriptors);
+    const descriptor = Array.from(detection?.descriptor || []);
+    if (descriptor.length) {
+      const yaw = estimateYaw(detection?.landmarks);
+      if (step.validateYaw(yaw)) {
+        samples.push(descriptor);
+        setMessage(`Step ${index}/${totalSteps}: ${step.label} (${samples.length}/${FACE_SAMPLES_PER_STEP}). Hold still.`, 'ok');
+        if (samples.length >= FACE_SAMPLES_PER_STEP) {
+          return averageDescriptors(samples);
+        }
+        poseMissCount = 0;
+      } else {
+        poseMissCount += 1;
+        if (poseMissCount % 5 === 0) {
+          setMessage(`Step ${index}/${totalSteps}: ${step.label}. ${step.guidance}`, 'ok');
+        }
       }
-      misses = 0;
+      noFaceCount = 0;
     } else {
-      misses += 1;
-      if (misses > 10) {
-        setMessage('Looking for your face... center your face in the ring and keep still.', 'ok');
+      noFaceCount += 1;
+      if (noFaceCount > 10) {
+        setMessage(`Step ${index}/${totalSteps}: Looking for your face. Center your face in the ring.`, 'ok');
       }
     }
 
     await new Promise((resolve) => setTimeout(resolve, FACE_SCAN_INTERVAL_MS));
   }
 
-  throw new Error('No stable face detected. Ensure your face is centered and well-lit.');
+  throw new Error(`Step ${index}/${totalSteps} timed out. ${step.guidance} Ensure lighting is stable.`);
 }
 
-async function loginByFace(descriptor) {
+async function captureFaceScan() {
+  const descriptorsByAngle = {};
+  for (let i = 0; i < FACE_SCAN_STEPS.length; i += 1) {
+    const step = FACE_SCAN_STEPS[i];
+    const descriptor = await captureFaceStep(step, i + 1, FACE_SCAN_STEPS.length);
+    descriptorsByAngle[step.key] = descriptor;
+    await new Promise((resolve) => setTimeout(resolve, 300));
+  }
+
+  const descriptor = averageDescriptors(Object.values(descriptorsByAngle));
+  if (!descriptor) {
+    throw new Error('Face scan failed. Please retry in stable lighting.');
+  }
+
+  return { descriptor, descriptorsByAngle };
+}
+
+async function loginByFace(faceScan) {
   const res = await fetch('/login/face', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ descriptor })
+    body: JSON.stringify(faceScan)
   });
 
   let data = {};
@@ -264,7 +344,7 @@ loginForm.addEventListener('submit', async (e) => {
     }
 
     state.afterPasswordGate = true;
-    state.descriptor = null;
+    state.faceScan = null;
     setStage('face');
     setMessage('Access code accepted. Continue with your face scan.', 'ok');
   } catch (err) {
@@ -276,7 +356,7 @@ loginForm.addEventListener('submit', async (e) => {
 
 faceSignInBtn.addEventListener('click', () => {
   state.afterPasswordGate = false;
-  state.descriptor = null;
+  state.faceScan = null;
   setMessage('', '');
   setStage('face');
 });
@@ -284,13 +364,13 @@ faceSignInBtn.addEventListener('click', () => {
 scanFaceBtn.addEventListener('click', async () => {
   if (state.scanInProgress) return;
   state.scanInProgress = true;
-  setLoading(scanFaceBtn, true, 'Scanning...', 'Scan Face');
+  setLoading(scanFaceBtn, true, 'Scanning 3 steps...', 'Start 3-Step Scan');
 
   try {
-    const descriptor = await captureFaceDescriptor();
-    state.descriptor = descriptor;
+    const faceScan = await captureFaceScan();
+    state.faceScan = faceScan;
 
-    const result = await loginByFace(descriptor);
+    const result = await loginByFace(faceScan);
     if (result.ok) {
       redirectToChat();
       return;
@@ -312,7 +392,7 @@ scanFaceBtn.addEventListener('click', async () => {
     setMessage(`Error: ${err.message}`, 'error');
   } finally {
     state.scanInProgress = false;
-    setLoading(scanFaceBtn, false, 'Scanning...', 'Scan Face');
+    setLoading(scanFaceBtn, false, 'Scanning 3 steps...', 'Start 3-Step Scan');
   }
 });
 
@@ -320,7 +400,7 @@ nicknameForm.addEventListener('submit', async (e) => {
   e.preventDefault();
   const nickname = nicknameInput.value.trim();
 
-  if (!state.descriptor) {
+  if (!state.faceScan?.descriptor) {
     setMessage('Face data missing. Please run face scan again.', 'error');
     setStage('face');
     return;
@@ -333,7 +413,7 @@ nicknameForm.addEventListener('submit', async (e) => {
     const res = await fetch('/login/enroll', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ nickname, descriptor: state.descriptor })
+      body: JSON.stringify({ nickname, ...state.faceScan })
     });
 
     const payload = await res.json().catch(() => ({}));
@@ -352,7 +432,7 @@ nicknameForm.addEventListener('submit', async (e) => {
 backBtn.addEventListener('click', () => {
   setMessage('', '');
   state.afterPasswordGate = false;
-  state.descriptor = null;
+  state.faceScan = null;
   setStage('password');
 });
 

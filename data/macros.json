@@ -11,10 +11,10 @@
       "enabled": true,
       "runtimeState": "idling",
       "lastFiredAt": 1773046345243,
-      "lastStateChangeAt": 1773276688794,
+      "lastStateChangeAt": 1773277180158,
       "lastRuntimeEvent": "runtime error: Variable \"temp\" was not found in Arduino Cloud thing \"a2c543e8-fbd2-4826-8540-1703e4cd7db7\". Available: LampColor, Humidity, Temprature, TV_State, Fan",
       "createdAt": 1772351472056,
-      "updatedAt": 1773276688794
+      "updatedAt": 1773277180158
     },
     {
       "id": "macro-1772860230772-988",
@@ -27,11 +27,11 @@
       "enabled": true,
       "runtimeState": "idling",
       "lastFiredAt": 0,
-      "lastStateChangeAt": 1773276688795,
+      "lastStateChangeAt": 1773277180159,
       "lastRuntimeEvent": "runtime error: Unexpected identifier 't'",
       "createdAt": 1772860230772,
-      "updatedAt": 1773276688795
+      "updatedAt": 1773277180159
     }
   ],
-  "updatedAt": 1773276688795
+  "updatedAt": 1773277180160
 }
