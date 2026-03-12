@@ -71,8 +71,9 @@ const CORS_ALLOWLIST = String(process.env.CORS_ALLOWLIST || '')
     .filter(Boolean);
 const QUICK_SIGNIN_TTL_MS = 5 * 60 * 1000;
 const PASSWORD_GATE_TTL_MS = 10 * 60 * 1000;
-const FACE_MATCH_THRESHOLD = Number(process.env.FACE_MATCH_THRESHOLD || 0.47);
-const FACE_MATCH_SUBTLE_MARGIN = Number(process.env.FACE_MATCH_SUBTLE_MARGIN || 0.06);
+const FACE_MATCH_THRESHOLD = Number(process.env.FACE_MATCH_THRESHOLD || 0.4);
+const FACE_MATCH_ANGLE_THRESHOLD = Number(process.env.FACE_MATCH_ANGLE_THRESHOLD || 0.43);
+const FACE_MATCH_AMBIGUITY_MARGIN = Number(process.env.FACE_MATCH_AMBIGUITY_MARGIN || 0.02);
 const HOSTED_IMAGE_TTL_MS = 15 * 60 * 1000;
 const HOSTED_IMAGE_MAX_BYTES = 6 * 1024 * 1024;
 const HOSTED_IMAGE_MAX_ITEMS = 300;
@@ -730,6 +731,8 @@ function buildFaceCandidateMetrics(incomingScan, profile) {
     const angleDistances = [];
     const incomingAngles = incomingScan.faceDescriptors || {};
     const profileAngles = profile.faceDescriptors || {};
+    const incomingAngleCount = Object.keys(incomingAngles).length;
+    const profileAngleCount = Object.keys(profileAngles).length;
 
     for (const angle of FACE_CAPTURE_ANGLES) {
         if (!incomingAngles[angle] || !profileAngles[angle]) continue;
@@ -741,29 +744,42 @@ function buildFaceCandidateMetrics(incomingScan, profile) {
             distance: aggregateDistance,
             aggregateDistance,
             angleDistances,
-            angleCount: 0
+            angleCount: 0,
+            angleMeanDistance: null,
+            angleMaxDistance: null,
+            strongAngleCount: 0,
+            incomingAngleCount,
+            profileAngleCount
         };
     }
 
     const sorted = angleDistances.slice().sort((a, b) => a - b);
-    const median = sorted[Math.floor(sorted.length / 2)];
-    const combinedDistance = (aggregateDistance * 0.45) + (median * 0.55);
+    const mean = sorted.reduce((sum, value) => sum + value, 0) / sorted.length;
+    const max = sorted[sorted.length - 1];
+    const strongAngleCount = sorted.filter((value) => value <= FACE_MATCH_ANGLE_THRESHOLD).length;
+    const combinedDistance = (aggregateDistance * 0.35) + (mean * 0.65);
     return {
-        distance: Math.min(combinedDistance, aggregateDistance),
+        distance: combinedDistance,
         aggregateDistance,
         angleDistances,
-        angleCount: angleDistances.length
+        angleCount: angleDistances.length,
+        angleMeanDistance: mean,
+        angleMaxDistance: max,
+        strongAngleCount,
+        incomingAngleCount,
+        profileAngleCount
     };
 }
 
 function isFaceCandidateAccepted(candidate) {
-    const dynamicThreshold = FACE_MATCH_THRESHOLD + (candidate.angleCount > 0 ? FACE_MATCH_SUBTLE_MARGIN : 0);
-    if (!Number.isFinite(candidate.distance) || candidate.distance > dynamicThreshold) return false;
+    if (candidate.incomingAngleCount >= 3 && candidate.profileAngleCount < 3) return false;
+    if (!Number.isFinite(candidate.distance) || candidate.distance > FACE_MATCH_THRESHOLD) return false;
+    if (!Number.isFinite(candidate.aggregateDistance) || candidate.aggregateDistance > FACE_MATCH_THRESHOLD) return false;
 
     if (candidate.angleCount >= 2) {
-        const looseAngleThreshold = dynamicThreshold + 0.04;
-        const strongAngles = candidate.angleDistances.filter((distance) => Number.isFinite(distance) && distance <= looseAngleThreshold).length;
-        if (strongAngles < 2) return false;
+        if (!Number.isFinite(candidate.angleMeanDistance) || candidate.angleMeanDistance > FACE_MATCH_ANGLE_THRESHOLD) return false;
+        if (!Number.isFinite(candidate.angleMaxDistance) || candidate.angleMaxDistance > (FACE_MATCH_ANGLE_THRESHOLD + 0.03)) return false;
+        if (candidate.strongAngleCount < Math.min(3, candidate.angleCount)) return false;
     }
     return true;
 }
@@ -838,6 +854,10 @@ function findBestFaceMatch(inputDescriptor) {
     const bestMatch = findBestFaceCandidate(inputDescriptor);
     if (!bestMatch) return null;
     if (!isFaceCandidateAccepted(bestMatch)) return null;
+    if (Number.isFinite(bestMatch.secondBestDistance)) {
+        const separation = bestMatch.secondBestDistance - bestMatch.distance;
+        if (separation < FACE_MATCH_AMBIGUITY_MARGIN) return null;
+    }
     return bestMatch;
 }
 
@@ -847,15 +867,21 @@ function findBestFaceCandidate(inputDescriptor) {
 
     const store = readFaceProfileStore();
     let bestMatch = null;
+    let secondBestDistance = Number.POSITIVE_INFINITY;
     for (const user of store.users) {
         const metrics = buildFaceCandidateMetrics(incomingScan, user);
         if (!bestMatch || metrics.distance < bestMatch.distance) {
+            secondBestDistance = bestMatch ? bestMatch.distance : secondBestDistance;
             bestMatch = {
                 user,
                 ...metrics
             };
+        } else if (metrics.distance < secondBestDistance) {
+            secondBestDistance = metrics.distance;
         }
     }
+    if (!bestMatch) return null;
+    bestMatch.secondBestDistance = Number.isFinite(secondBestDistance) ? secondBestDistance : null;
     return bestMatch;
 }
 
@@ -1119,12 +1145,11 @@ app.post('/api/faces/match-batch', requireWhitelistedIp, requireAuth, (req, res)
 
         const candidate = findBestFaceCandidate(faceScan);
         const isMatch = Boolean(candidate && isFaceCandidateAccepted(candidate));
-        const dynamicThreshold = FACE_MATCH_THRESHOLD + (candidate?.angleCount > 0 ? FACE_MATCH_SUBTLE_MARGIN : 0);
         return {
             index,
             matched: isMatch,
             distance: candidate?.distance ?? null,
-            threshold: dynamicThreshold,
+            threshold: FACE_MATCH_THRESHOLD,
             userId: isMatch ? candidate.user.id : null,
             nickname: isMatch ? candidate.user.nickname : null
         };
