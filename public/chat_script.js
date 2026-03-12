@@ -57,6 +57,8 @@ let chatHistory = [];
 let chatThreads = [];
 let currentThreadId = null;
 let saveTimeout = null;
+let isSavingThreads = false;
+let pendingThreadsSave = false;
 let contextMenuThreadId = null;
 let chatContextMenu = null;
 let selectedTextModel = DEFAULT_MODEL;
@@ -980,24 +982,42 @@ const executeCreateMacro = async (args, incomingMessageDiv) => {
     }
 };
 
-const saveThreadsToServer = async () => {
+const saveThreadsToServer = async ({ keepalive = false } = {}) => {
+    if (isSavingThreads && !keepalive) {
+        pendingThreadsSave = true;
+        return;
+    }
+    isSavingThreads = true;
     try {
-        await fetch(CHAT_STATE_API_URL, {
+        const response = await fetch(CHAT_STATE_API_URL, {
             method: "PUT",
+            credentials: "same-origin",
+            keepalive,
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
                 threads: chatThreads,
                 activeThreadId: currentThreadId
             })
         });
+        if (!response.ok) {
+            const payload = await response.json().catch(() => null);
+            throw new Error(payload?.error?.message || payload?.message || `${response.status} ${response.statusText}`);
+        }
     } catch (error) {
         console.error("Failed to save chats:", error);
+    } finally {
+        isSavingThreads = false;
+        if (pendingThreadsSave) {
+            pendingThreadsSave = false;
+            queueSaveThreads();
+        }
     }
 };
 
 const queueSaveThreads = () => {
     if (saveTimeout) clearTimeout(saveTimeout);
     saveTimeout = setTimeout(() => {
+        saveTimeout = null;
         saveThreadsToServer();
     }, 250);
 };
@@ -1217,7 +1237,14 @@ const startNewThread = (replaceUrl = false) => {
 
 const initializeThreads = async () => {
     try {
-        const response = await fetch(CHAT_STATE_API_URL, { method: "GET" });
+        const response = await fetch(CHAT_STATE_API_URL, {
+            method: "GET",
+            credentials: "same-origin"
+        });
+        if (response.status === 401) {
+            window.location.assign("/");
+            return;
+        }
         if (!response.ok) throw new Error("Unable to load chats from server");
         const payload = await response.json();
         chatThreads = Array.isArray(payload?.threads) ? payload.threads : [];
@@ -1245,6 +1272,15 @@ const initializeThreads = async () => {
         startNewThread(true);
     }
 };
+
+window.addEventListener("pagehide", () => {
+    if (saveTimeout) {
+        clearTimeout(saveTimeout);
+        saveTimeout = null;
+    }
+    if (!chatThreads.length) return;
+    saveThreadsToServer({ keepalive: true });
+});
 
 async function executeWebSearch(query, incomingMessageDiv) {
     const messageElement = incomingMessageDiv.querySelector(".message-text");

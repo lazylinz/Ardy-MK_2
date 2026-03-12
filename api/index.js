@@ -1929,8 +1929,8 @@ function putChatsHandler(req, res) {
 
 // Register both prefixed and unprefixed routes to support different mount styles.
 ['/api/chats', '/chats'].forEach((route) => {
-    app.get(route, requireWhitelistedIp, getChatsHandler);
-    app.put(route, requireWhitelistedIp, putChatsHandler);
+    app.get(route, requireWhitelistedIp, requireAuth, getChatsHandler);
+    app.put(route, requireWhitelistedIp, requireAuth, putChatsHandler);
 });
 
 // --- protect everything except login page before serving static files ---
