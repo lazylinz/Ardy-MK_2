@@ -72,6 +72,10 @@ const CORS_ALLOWLIST = String(process.env.CORS_ALLOWLIST || '')
 const QUICK_SIGNIN_TTL_MS = 5 * 60 * 1000;
 const PASSWORD_GATE_TTL_MS = 10 * 60 * 1000;
 const FACE_MATCH_THRESHOLD = Number(process.env.FACE_MATCH_THRESHOLD || 0.47);
+const FACE_MATCH_MARGIN = Number(process.env.FACE_MATCH_MARGIN || 0.035);
+const FACE_PROFILE_MIN_SAMPLES = Math.max(3, Number(process.env.FACE_PROFILE_MIN_SAMPLES || 6));
+const FACE_PROFILE_MAX_SAMPLES = Math.max(FACE_PROFILE_MIN_SAMPLES, Number(process.env.FACE_PROFILE_MAX_SAMPLES || 24));
+const FACE_PROFILE_DEDUP_DISTANCE = Number(process.env.FACE_PROFILE_DEDUP_DISTANCE || 0.12);
 const HOSTED_IMAGE_TTL_MS = 15 * 60 * 1000;
 const HOSTED_IMAGE_MAX_BYTES = 6 * 1024 * 1024;
 const HOSTED_IMAGE_MAX_ITEMS = 300;
@@ -656,6 +660,26 @@ function sanitizeFaceDescriptor(rawDescriptor) {
     return normalized.slice(0, 256);
 }
 
+function averageFaceDescriptors(descriptors) {
+    if (!Array.isArray(descriptors) || !descriptors.length) return null;
+    const first = sanitizeFaceDescriptor(descriptors[0]);
+    if (!first) return null;
+
+    const length = first.length;
+    const sum = new Array(length).fill(0);
+    let count = 0;
+    for (const raw of descriptors) {
+        const descriptor = sanitizeFaceDescriptor(raw);
+        if (!descriptor || descriptor.length !== length) continue;
+        for (let i = 0; i < length; i += 1) {
+            sum[i] += descriptor[i];
+        }
+        count += 1;
+    }
+    if (!count) return null;
+    return sum.map((value) => value / count);
+}
+
 function sanitizeNickname(rawNickname) {
     const cleaned = String(rawNickname || '')
         .replace(/\s+/g, ' ')
@@ -674,6 +698,62 @@ function faceDistance(descriptorA, descriptorB) {
         sum += delta * delta;
     }
     return Math.sqrt(sum);
+}
+
+function sanitizeFaceDescriptorSet(raw) {
+    const source = Array.isArray(raw) ? raw : [raw];
+    const descriptors = [];
+    for (const entry of source) {
+        const descriptor = sanitizeFaceDescriptor(entry);
+        if (descriptor) descriptors.push(descriptor);
+    }
+    if (!descriptors.length) return [];
+
+    const deduped = [];
+    for (const descriptor of descriptors) {
+        const duplicate = deduped.some((existing) => faceDistance(existing, descriptor) <= FACE_PROFILE_DEDUP_DISTANCE);
+        if (!duplicate) deduped.push(descriptor);
+        if (deduped.length >= FACE_PROFILE_MAX_SAMPLES) break;
+    }
+    return deduped;
+}
+
+function normalizeFaceProfile(entry) {
+    const profileSamples = sanitizeFaceDescriptorSet(entry?.faceProfile?.samples || []);
+    const directSamples = sanitizeFaceDescriptorSet(entry?.faceDescriptors || []);
+    const singleDescriptor = sanitizeFaceDescriptor(entry?.faceDescriptor);
+    const merged = [];
+
+    for (const descriptor of [...profileSamples, ...directSamples, ...(singleDescriptor ? [singleDescriptor] : [])]) {
+        const duplicate = merged.some((existing) => faceDistance(existing, descriptor) <= FACE_PROFILE_DEDUP_DISTANCE);
+        if (!duplicate) merged.push(descriptor);
+        if (merged.length >= FACE_PROFILE_MAX_SAMPLES) break;
+    }
+    if (!merged.length) return null;
+
+    const centroid = averageFaceDescriptors(merged);
+    if (!centroid) return null;
+    return {
+        version: 2,
+        samples: merged.slice(0, FACE_PROFILE_MAX_SAMPLES),
+        centroid
+    };
+}
+
+function faceProfileDistance(inputDescriptor, faceProfile) {
+    const descriptor = sanitizeFaceDescriptor(inputDescriptor);
+    if (!descriptor || !faceProfile) return Number.POSITIVE_INFINITY;
+    const centroidDistance = faceDistance(descriptor, faceProfile.centroid);
+    const sampleDistances = (faceProfile.samples || [])
+        .map((sample) => faceDistance(descriptor, sample))
+        .filter((value) => Number.isFinite(value))
+        .sort((a, b) => a - b);
+    if (!sampleDistances.length || !Number.isFinite(centroidDistance)) return Number.POSITIVE_INFINITY;
+
+    const nearestCount = Math.min(3, sampleDistances.length);
+    const nearestAverage = sampleDistances.slice(0, nearestCount).reduce((acc, value) => acc + value, 0) / nearestCount;
+    const bestSample = sampleDistances[0];
+    return (bestSample * 0.5) + (nearestAverage * 0.3) + (centroidDistance * 0.2);
 }
 
 function ensureFaceProfileStoreFile() {
@@ -696,12 +776,15 @@ function readFaceProfileStore() {
                 .map((entry) => {
                     const id = String(entry?.id || '').trim();
                     const nickname = sanitizeNickname(entry?.nickname);
-                    const descriptor = sanitizeFaceDescriptor(entry?.faceDescriptor);
-                    if (!id || !nickname || !descriptor) return null;
+                    const faceProfile = normalizeFaceProfile(entry);
+                    if (!id || !nickname || !faceProfile) return null;
                     return {
                         id,
                         nickname,
-                        faceDescriptor: descriptor,
+                        faceProfile,
+                        // Compatibility alias for old code paths.
+                        faceDescriptor: faceProfile.centroid,
+                        faceDescriptors: faceProfile.samples,
                         createdAt: Number.isFinite(Number(entry?.createdAt)) ? Number(entry.createdAt) : Date.now(),
                         updatedAt: Number.isFinite(Number(entry?.updatedAt)) ? Number(entry.updatedAt) : Date.now(),
                         lastSeenAt: Number.isFinite(Number(entry?.lastSeenAt)) ? Number(entry.lastSeenAt) : null
@@ -716,7 +799,26 @@ function readFaceProfileStore() {
 
 function writeFaceProfileStore(store) {
     ensureFaceProfileStoreFile();
-    fs.writeFileSync(faceProfileStoreFile, JSON.stringify(store, null, 2));
+    const normalizedUsers = (Array.isArray(store?.users) ? store.users : []).map((entry) => {
+        const id = String(entry?.id || '').trim();
+        const nickname = sanitizeNickname(entry?.nickname);
+        const faceProfile = normalizeFaceProfile(entry);
+        if (!id || !nickname || !faceProfile) return null;
+        return {
+            id,
+            nickname,
+            faceProfile,
+            faceDescriptors: faceProfile.samples,
+            faceDescriptor: faceProfile.centroid,
+            createdAt: Number.isFinite(Number(entry?.createdAt)) ? Number(entry.createdAt) : Date.now(),
+            updatedAt: Number.isFinite(Number(entry?.updatedAt)) ? Number(entry.updatedAt) : Date.now(),
+            lastSeenAt: Number.isFinite(Number(entry?.lastSeenAt)) ? Number(entry.lastSeenAt) : null
+        };
+    }).filter(Boolean);
+
+    const tempFile = `${faceProfileStoreFile}.tmp`;
+    fs.writeFileSync(tempFile, JSON.stringify({ users: normalizedUsers }, null, 2));
+    fs.renameSync(tempFile, faceProfileStoreFile);
 }
 
 function hasRecentPasswordVerification(req) {
@@ -743,7 +845,42 @@ function findBestFaceMatch(inputDescriptor) {
     const bestMatch = findBestFaceCandidate(inputDescriptor);
     if (!bestMatch) return null;
     if (bestMatch.distance > FACE_MATCH_THRESHOLD) return null;
+    if (bestMatch.margin !== null && bestMatch.margin < FACE_MATCH_MARGIN) return null;
     return bestMatch;
+}
+
+function findBestFaceMatchFromSet(descriptors) {
+    if (!Array.isArray(descriptors) || !descriptors.length) return null;
+    const tally = new Map();
+    for (const descriptor of descriptors) {
+        const match = findBestFaceMatch(descriptor);
+        if (!match) continue;
+        const key = match.user.id;
+        const current = tally.get(key) || {
+            user: match.user,
+            totalDistance: 0,
+            count: 0
+        };
+        current.totalDistance += Number(match.distance || 0);
+        current.count += 1;
+        tally.set(key, current);
+    }
+    if (!tally.size) return null;
+
+    let best = null;
+    for (const item of tally.values()) {
+        const avgDistance = item.totalDistance / item.count;
+        if (!best) {
+            best = { user: item.user, votes: item.count, distance: avgDistance };
+            continue;
+        }
+        if (item.count > best.votes || (item.count === best.votes && avgDistance < best.distance)) {
+            best = { user: item.user, votes: item.count, distance: avgDistance };
+        }
+    }
+    if (!best) return null;
+    if (best.votes < Math.max(2, Math.ceil(descriptors.length / 2))) return null;
+    return best;
 }
 
 function findBestFaceCandidate(inputDescriptor) {
@@ -752,28 +889,78 @@ function findBestFaceCandidate(inputDescriptor) {
 
     const store = readFaceProfileStore();
     let bestMatch = null;
+    let secondBestDistance = Number.POSITIVE_INFINITY;
     for (const user of store.users) {
-        const distance = faceDistance(descriptor, user.faceDescriptor);
+        const distance = faceProfileDistance(descriptor, user.faceProfile);
+        if (!Number.isFinite(distance)) continue;
         if (!bestMatch || distance < bestMatch.distance) {
+            if (bestMatch && Number.isFinite(bestMatch.distance)) {
+                secondBestDistance = Math.min(secondBestDistance, bestMatch.distance);
+            }
             bestMatch = { user, distance };
+        } else {
+            secondBestDistance = Math.min(secondBestDistance, distance);
         }
     }
+    if (!bestMatch) return null;
+    bestMatch.margin = Number.isFinite(secondBestDistance)
+        ? secondBestDistance - bestMatch.distance
+        : null;
     return bestMatch;
 }
 
-function touchFaceProfileLastSeen(userId) {
+function refreshFaceProfileWithDescriptor(user, descriptor) {
+    const sample = sanitizeFaceDescriptor(descriptor);
+    if (!user || !sample) return user;
+    const profile = normalizeFaceProfile(user);
+    if (!profile) return user;
+
+    const samples = [...profile.samples];
+    const isDuplicate = samples.some((existing) => faceDistance(existing, sample) <= FACE_PROFILE_DEDUP_DISTANCE);
+    if (!isDuplicate) samples.push(sample);
+    const trimmed = samples.slice(-FACE_PROFILE_MAX_SAMPLES);
+    const centroid = averageFaceDescriptors(trimmed) || profile.centroid;
+    return {
+        ...user,
+        faceProfile: {
+            version: 2,
+            samples: trimmed,
+            centroid
+        },
+        faceDescriptors: trimmed,
+        faceDescriptor: centroid
+    };
+}
+
+function touchFaceProfileLastSeen(userId, descriptor) {
     const id = String(userId || '').trim();
     if (!id) return;
     const store = readFaceProfileStore();
     const now = Date.now();
     const idx = store.users.findIndex((entry) => entry.id === id);
     if (idx < 0) return;
+    const refreshed = refreshFaceProfileWithDescriptor(store.users[idx], descriptor);
     store.users[idx] = {
         ...store.users[idx],
+        ...refreshed,
         lastSeenAt: now,
         updatedAt: now
     };
     writeFaceProfileStore(store);
+}
+
+function getFaceProbeFromRequest(body) {
+    const setFromList = sanitizeFaceDescriptorSet(body?.descriptors || []);
+    const single = sanitizeFaceDescriptor(body?.descriptor);
+    const descriptors = [...setFromList];
+    if (single) {
+        const duplicate = descriptors.some((entry) => faceDistance(entry, single) <= FACE_PROFILE_DEDUP_DISTANCE);
+        if (!duplicate) descriptors.push(single);
+    }
+    if (!descriptors.length) return null;
+    const descriptor = averageFaceDescriptors(descriptors);
+    if (!descriptor) return null;
+    return { descriptor, descriptors };
 }
 
 // --- authentication routes ---
@@ -804,12 +991,12 @@ app.post('/login', (req, res) => {
 });
 
 app.post('/login/face', (req, res) => {
-    const descriptor = sanitizeFaceDescriptor(req.body?.descriptor);
-    if (!descriptor) {
+    const probe = getFaceProbeFromRequest(req.body);
+    if (!probe?.descriptor) {
         return res.status(400).json({ success: false, message: 'Face descriptor is invalid.' });
     }
 
-    const bestMatch = findBestFaceMatch(descriptor);
+    const bestMatch = findBestFaceMatch(probe.descriptor) || findBestFaceMatchFromSet(probe.descriptors);
     if (!bestMatch) {
         return res.status(404).json({
             success: false,
@@ -819,7 +1006,7 @@ app.post('/login/face', (req, res) => {
     }
 
     establishAuthenticatedRequest(req, res, bestMatch.user.id);
-    touchFaceProfileLastSeen(bestMatch.user.id);
+    touchFaceProfileLastSeen(bestMatch.user.id, probe.descriptor);
     return res.json({
         success: true,
         userId: bestMatch.user.id,
@@ -828,7 +1015,7 @@ app.post('/login/face', (req, res) => {
 });
 
 app.post('/login/enroll', (req, res) => {
-    const descriptor = sanitizeFaceDescriptor(req.body?.descriptor);
+    const probe = getFaceProbeFromRequest(req.body);
     const nickname = sanitizeNickname(req.body?.nickname);
     const password = String(req.body?.password || '');
     const isPasswordAllowed = password === PASSWORD || hasRecentPasswordVerification(req);
@@ -839,8 +1026,14 @@ app.post('/login/enroll', (req, res) => {
             message: 'Password verification required before enrollment.'
         });
     }
-    if (!descriptor) {
+    if (!probe?.descriptor) {
         return res.status(400).json({ success: false, message: 'Face descriptor is invalid.' });
+    }
+    if (probe.descriptors.length < FACE_PROFILE_MIN_SAMPLES) {
+        return res.status(400).json({
+            success: false,
+            message: `Please capture at least ${FACE_PROFILE_MIN_SAMPLES} stable face samples before enrollment.`
+        });
     }
     if (!nickname || !/^[A-Za-z0-9 _.-]{2,32}$/.test(nickname)) {
         return res.status(400).json({
@@ -849,7 +1042,7 @@ app.post('/login/enroll', (req, res) => {
         });
     }
 
-    const existing = findBestFaceMatch(descriptor);
+    const existing = findBestFaceMatch(probe.descriptor);
     if (existing) {
         return res.status(409).json({
             success: false,
@@ -865,7 +1058,13 @@ app.post('/login/enroll', (req, res) => {
     store.users.push({
         id: userId,
         nickname,
-        faceDescriptor: descriptor,
+        faceProfile: {
+            version: 2,
+            samples: probe.descriptors.slice(0, FACE_PROFILE_MAX_SAMPLES),
+            centroid: probe.descriptor
+        },
+        faceDescriptors: probe.descriptors.slice(0, FACE_PROFILE_MAX_SAMPLES),
+        faceDescriptor: probe.descriptor,
         createdAt: now,
         updatedAt: now,
         lastSeenAt: now

@@ -15,14 +15,19 @@ const nicknameInput = document.getElementById('nickname');
 const enrollBtn = document.getElementById('enrollBtn');
 
 const FACE_MODEL_URI = 'https://cdn.jsdelivr.net/npm/@vladmandic/face-api/model/';
-const FACE_SAMPLES_REQUIRED = 3;
-const FACE_SCAN_MAX_ATTEMPTS = 40;
-const FACE_SCAN_INTERVAL_MS = 220;
+const FACE_SAMPLES_REQUIRED = 8;
+const FACE_SAMPLES_MIN_ACCEPTED = 5;
+const FACE_SCAN_MAX_ATTEMPTS = 120;
+const FACE_SCAN_INTERVAL_MS = 180;
+const FACE_MIN_DETECTION_SCORE = 0.72;
+const FACE_MIN_BOX_RATIO = 0.08;
+const FACE_MAX_OUTLIER_DISTANCE = 0.55;
+const FACE_MIN_VARIATION_DISTANCE = 0.035;
 
 const state = {
   mode: 'password',
   afterPasswordGate: false,
-  descriptor: null,
+  faceCapture: null,
   stream: null,
   cameraStarting: null,
   scanInProgress: false,
@@ -178,13 +183,39 @@ function averageDescriptors(descriptors) {
   return avg;
 }
 
-async function captureFaceDescriptor() {
+function faceDistance(descriptorA, descriptorB) {
+  if (!Array.isArray(descriptorA) || !Array.isArray(descriptorB)) return Number.POSITIVE_INFINITY;
+  const dims = Math.min(descriptorA.length, descriptorB.length);
+  if (dims < 32) return Number.POSITIVE_INFINITY;
+  let sum = 0;
+  for (let i = 0; i < dims; i += 1) {
+    const delta = Number(descriptorA[i]) - Number(descriptorB[i]);
+    sum += delta * delta;
+  }
+  return Math.sqrt(sum);
+}
+
+function getFaceBoxRatio(detection) {
+  const box = detection?.detection?.box;
+  const width = Number(faceVideo?.videoWidth || 0);
+  const height = Number(faceVideo?.videoHeight || 0);
+  if (!box || !width || !height) return 0;
+  const boxWidth = Math.max(0, Number(box.width || 0));
+  const boxHeight = Math.max(0, Number(box.height || 0));
+  return (boxWidth * boxHeight) / (width * height);
+}
+
+function wait(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function captureFaceSignature() {
   await loadFaceModels();
   await startCamera();
 
   const options = new faceapi.TinyFaceDetectorOptions({
-    inputSize: 160,
-    scoreThreshold: 0.5
+    inputSize: 224,
+    scoreThreshold: 0.55
   });
 
   const descriptors = [];
@@ -196,31 +227,64 @@ async function captureFaceDescriptor() {
       .withFaceLandmarks()
       .withFaceDescriptor();
 
-    if (detection?.descriptor) {
-      descriptors.push(Array.from(detection.descriptor));
-      setMessage(`Face detected (${descriptors.length}/${FACE_SAMPLES_REQUIRED})... hold still`, 'ok');
+    const score = Number(detection?.detection?.score || 0);
+    const boxRatio = getFaceBoxRatio(detection);
+
+    if (detection?.descriptor && score >= FACE_MIN_DETECTION_SCORE && boxRatio >= FACE_MIN_BOX_RATIO) {
+      const sample = Array.from(detection.descriptor);
+      const rollingDescriptor = descriptors.length ? averageDescriptors(descriptors) : null;
+      if (rollingDescriptor) {
+        const drift = faceDistance(sample, rollingDescriptor);
+        if (Number.isFinite(drift) && drift > FACE_MAX_OUTLIER_DISTANCE) {
+          setMessage('Hold a steady angle and keep your whole face in frame.', 'ok');
+          await wait(FACE_SCAN_INTERVAL_MS);
+          continue;
+        }
+      }
+      if (descriptors.length) {
+        const last = descriptors[descriptors.length - 1];
+        const variation = faceDistance(last, sample);
+        if (Number.isFinite(variation) && variation < FACE_MIN_VARIATION_DISTANCE) {
+          await wait(FACE_SCAN_INTERVAL_MS);
+          continue;
+        }
+      }
+
+      descriptors.push(sample);
+      setMessage(`Collecting stable frames (${descriptors.length}/${FACE_SAMPLES_REQUIRED})...`, 'ok');
       if (descriptors.length >= FACE_SAMPLES_REQUIRED) {
-        return averageDescriptors(descriptors);
+        return {
+          descriptor: averageDescriptors(descriptors),
+          descriptors
+        };
       }
       misses = 0;
     } else {
       misses += 1;
       if (misses > 10) {
-        setMessage('Looking for your face... center your face in the ring and keep still.', 'ok');
+        setMessage('Center your full face in the ring with brighter lighting.', 'ok');
       }
     }
 
-    await new Promise((resolve) => setTimeout(resolve, FACE_SCAN_INTERVAL_MS));
+    await wait(FACE_SCAN_INTERVAL_MS);
   }
 
+  if (descriptors.length >= FACE_SAMPLES_MIN_ACCEPTED) {
+    return {
+      descriptor: averageDescriptors(descriptors),
+      descriptors
+    };
+  }
   throw new Error('No stable face detected. Ensure your face is centered and well-lit.');
 }
 
-async function loginByFace(descriptor) {
+async function loginByFace(faceCapture) {
+  const descriptor = Array.isArray(faceCapture?.descriptor) ? faceCapture.descriptor : null;
+  const descriptors = Array.isArray(faceCapture?.descriptors) ? faceCapture.descriptors : [];
   const res = await fetch('/login/face', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ descriptor })
+    body: JSON.stringify({ descriptor, descriptors })
   });
 
   let data = {};
@@ -264,7 +328,7 @@ loginForm.addEventListener('submit', async (e) => {
     }
 
     state.afterPasswordGate = true;
-    state.descriptor = null;
+    state.faceCapture = null;
     setStage('face');
     setMessage('Access code accepted. Continue with your face scan.', 'ok');
   } catch (err) {
@@ -276,7 +340,7 @@ loginForm.addEventListener('submit', async (e) => {
 
 faceSignInBtn.addEventListener('click', () => {
   state.afterPasswordGate = false;
-  state.descriptor = null;
+  state.faceCapture = null;
   setMessage('', '');
   setStage('face');
 });
@@ -287,10 +351,10 @@ scanFaceBtn.addEventListener('click', async () => {
   setLoading(scanFaceBtn, true, 'Scanning...', 'Scan Face');
 
   try {
-    const descriptor = await captureFaceDescriptor();
-    state.descriptor = descriptor;
+    const faceCapture = await captureFaceSignature();
+    state.faceCapture = faceCapture;
 
-    const result = await loginByFace(descriptor);
+    const result = await loginByFace(faceCapture);
     if (result.ok) {
       redirectToChat();
       return;
@@ -320,7 +384,7 @@ nicknameForm.addEventListener('submit', async (e) => {
   e.preventDefault();
   const nickname = nicknameInput.value.trim();
 
-  if (!state.descriptor) {
+  if (!state.faceCapture?.descriptor) {
     setMessage('Face data missing. Please run face scan again.', 'error');
     setStage('face');
     return;
@@ -333,7 +397,11 @@ nicknameForm.addEventListener('submit', async (e) => {
     const res = await fetch('/login/enroll', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ nickname, descriptor: state.descriptor })
+      body: JSON.stringify({
+        nickname,
+        descriptor: state.faceCapture.descriptor,
+        descriptors: state.faceCapture.descriptors
+      })
     });
 
     const payload = await res.json().catch(() => ({}));
@@ -352,7 +420,7 @@ nicknameForm.addEventListener('submit', async (e) => {
 backBtn.addEventListener('click', () => {
   setMessage('', '');
   state.afterPasswordGate = false;
-  state.descriptor = null;
+  state.faceCapture = null;
   setStage('password');
 });
 
