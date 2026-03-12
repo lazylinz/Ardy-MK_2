@@ -898,6 +898,18 @@ app.get('/quick-signin', (req, res) => {
     return res.redirect('/chat.html');
 });
 
+app.post('/api/quick-signin-token/revoke', requireWhitelistedIp, requireAuth, (req, res) => {
+    const token = String(req.body?.token || '').trim();
+    if (!token) {
+        return res.status(400).json({ error: { message: 'token is required.' } });
+    }
+    const revoked = revokeQuickSigninToken(token, getSessionUserKey(req));
+    if (!revoked) {
+        return res.status(404).json({ error: { message: 'Token not found or already expired.' } });
+    }
+    return res.json({ success: true });
+});
+
 app.get('/api/auth/me', requireWhitelistedIp, requireAuth, (req, res) => {
     const userId = getSessionUserKey(req);
     const store = readFaceProfileStore();
@@ -1831,7 +1843,7 @@ function getRequestOrigin(req) {
 function pruneQuickSigninTokens() {
     const now = Date.now();
     for (const [token, entry] of quickSigninTokens.entries()) {
-        if (!entry || entry.used || entry.expiresAt <= now) {
+        if (!entry || entry.expiresAt <= now) {
             quickSigninTokens.delete(token);
         }
     }
@@ -1845,8 +1857,7 @@ function mintQuickSigninToken(sessionOwner) {
         token,
         ownerSessionId: String(sessionOwner || ''),
         createdAt: now,
-        expiresAt: now + QUICK_SIGNIN_TTL_MS,
-        used: false
+        expiresAt: now + QUICK_SIGNIN_TTL_MS
     });
     return token;
 }
@@ -1854,10 +1865,17 @@ function mintQuickSigninToken(sessionOwner) {
 function consumeQuickSigninToken(token) {
     pruneQuickSigninTokens();
     const entry = quickSigninTokens.get(token);
-    if (!entry || entry.used || entry.expiresAt <= Date.now()) return null;
-    entry.used = true;
-    quickSigninTokens.set(token, entry);
+    if (!entry || entry.expiresAt <= Date.now()) return null;
     return entry;
+}
+
+function revokeQuickSigninToken(token, requestSessionOwner) {
+    pruneQuickSigninTokens();
+    const entry = quickSigninTokens.get(token);
+    if (!entry || entry.expiresAt <= Date.now()) return false;
+    if (entry.ownerSessionId !== String(requestSessionOwner || '')) return false;
+    quickSigninTokens.delete(token);
+    return true;
 }
 
 function sanitizeThreads(rawThreads) {

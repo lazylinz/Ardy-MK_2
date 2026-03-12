@@ -30,6 +30,7 @@ const ARDUINO_READ_VARIABLE_API_URL = "/api/arduino/read-variable";
 const ARDUINO_WRITE_VARIABLE_API_URL = "/api/arduino/write-variable";
 const OS_TIME_API_URL = "/api/os/time";
 const QUICK_SIGNIN_TOKEN_API_URL = "/api/quick-signin-token";
+const QUICK_SIGNIN_REVOKE_API_URL = "/api/quick-signin-token/revoke";
 const CHAT_QUERY_PARAM = "chat";
 const MODEL_STORAGE_KEY = "ardy_selected_text_model_v1";
 const MULTI_AGENT_MODE_STORAGE_KEY = "ardy_multi_agent_mode_v1";
@@ -71,6 +72,8 @@ let preferredArdyVoice = null;
 let pendingVoiceReplyFromStt = false;
 let activeArdyAudio = null;
 let ttsRequestSequence = 0;
+let activeQuickSigninToken = null;
+let quickSigninRequestNonce = 0;
 const initialInputHeight = messageInput.scrollHeight;
 const PUTER_TTS_PROVIDER = "openai";
 const PUTER_TTS_VOICE = "echo";
@@ -875,18 +878,50 @@ const setChatUrl = (threadId, replace = false) => {
     window.history.pushState({}, "", next);
 };
 
+const revokeQuickSigninToken = async (token) => {
+    const tokenValue = String(token || "").trim();
+    if (!tokenValue) return;
+    try {
+        await fetch(QUICK_SIGNIN_REVOKE_API_URL, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ token: tokenValue }),
+            keepalive: true
+        });
+    } catch (error) {
+        // Best-effort cleanup; token will still age out via TTL if revocation fails.
+    }
+};
+
 const closeQuickSigninModal = () => {
     if (!quickSigninModal) return;
     quickSigninModal.classList.remove("show");
     quickSigninModal.setAttribute("aria-hidden", "true");
+
+    const tokenToRevoke = activeQuickSigninToken;
+    activeQuickSigninToken = null;
+    quickSigninRequestNonce += 1;
+
+    if (quickSigninQrImage) quickSigninQrImage.removeAttribute("src");
+    if (quickSigninUrlText) quickSigninUrlText.textContent = "";
+
+    if (tokenToRevoke) {
+        void revokeQuickSigninToken(tokenToRevoke);
+    }
 };
 
 const openQuickSigninModal = async () => {
     if (!quickSigninModal || !quickSigninQrImage || !quickSigninUrlText) return;
+    if (activeQuickSigninToken) {
+        void revokeQuickSigninToken(activeQuickSigninToken);
+        activeQuickSigninToken = null;
+    }
+
     quickSigninModal.classList.add("show");
     quickSigninModal.setAttribute("aria-hidden", "false");
-    quickSigninUrlText.textContent = "Generating one-time sign-in QR...";
+    quickSigninUrlText.textContent = "Generating reusable sign-in QR...";
     quickSigninQrImage.removeAttribute("src");
+    const requestNonce = ++quickSigninRequestNonce;
 
     try {
         const response = await fetch(QUICK_SIGNIN_TOKEN_API_URL, { method: "POST" });
@@ -895,12 +930,21 @@ const openQuickSigninModal = async () => {
             throw new Error(payload?.error?.message || `${response.status} ${response.statusText}`);
         }
 
+        if (requestNonce !== quickSigninRequestNonce || !quickSigninModal.classList.contains("show")) {
+            return;
+        }
+
         const url = String(payload?.url || "").trim();
+        const token = String(payload?.token || "").trim();
         if (!url) throw new Error("Invalid quick sign-in URL.");
+        if (!token) throw new Error("Invalid quick sign-in token.");
+
+        activeQuickSigninToken = token;
 
         quickSigninQrImage.src = `https://api.qrserver.com/v1/create-qr-code/?size=320x320&data=${encodeURIComponent(url)}`;
         quickSigninUrlText.textContent = url;
     } catch (error) {
+        if (requestNonce !== quickSigninRequestNonce || !quickSigninModal.classList.contains("show")) return;
         quickSigninUrlText.textContent = `Failed to generate quick sign-in URL: ${error.message}`;
     }
 };
