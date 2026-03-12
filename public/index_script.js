@@ -71,12 +71,12 @@ function setStage(stage) {
   nicknameForm.classList.toggle('hidden', !isNickname);
 
   if (isPassword) {
-    stageSubtitle.textContent = 'Enter your access password to continue.';
+    stageSubtitle.textContent = 'Enter your project access code to continue.';
     stopCamera();
   } else if (isFace) {
     stageSubtitle.textContent = state.afterPasswordGate
       ? 'Face scan required. If new, create your nickname next.'
-      : 'Position your face inside the frame to sign in.';
+      : 'Position your face inside the frame to continue.';
     startCamera().catch((err) => {
       setMessage(`Camera error: ${err.message}`, 'error');
     });
@@ -234,7 +234,7 @@ async function loginByFace(descriptor) {
 
 function redirectToChat() {
   stopCamera();
-  setMessage('Sign in successful. Redirecting...', 'ok');
+  setMessage('Access granted. Redirecting...', 'ok');
   setTimeout(() => {
     window.location.href = 'chat.html';
   }, 450);
@@ -244,7 +244,7 @@ loginForm.addEventListener('submit', async (e) => {
   e.preventDefault();
   const pwd = passwordInput.value;
   setMessage('', '');
-  setLoading(loginBtn, true, 'Checking...', 'Continue');
+  setLoading(loginBtn, true, 'Checking...', 'Enter Workspace');
 
   try {
     const res = await fetch('/login/password', {
@@ -266,11 +266,11 @@ loginForm.addEventListener('submit', async (e) => {
     state.afterPasswordGate = true;
     state.descriptor = null;
     setStage('face');
-    setMessage('Password accepted. Continue with your face scan.', 'ok');
+    setMessage('Access code accepted. Continue with your face scan.', 'ok');
   } catch (err) {
     setMessage(`Error: ${err.message}`, 'error');
   } finally {
-    setLoading(loginBtn, false, 'Checking...', 'Continue');
+    setLoading(loginBtn, false, 'Checking...', 'Enter Workspace');
   }
 });
 
@@ -303,7 +303,7 @@ scanFaceBtn.addEventListener('click', async () => {
     }
 
     if (result.status === 404) {
-      setMessage('Face not recognized. Use password login first, then enroll as a new user.', 'error');
+      setMessage('Face not recognized. Use access code first, then enroll as a new user.', 'error');
       return;
     }
 

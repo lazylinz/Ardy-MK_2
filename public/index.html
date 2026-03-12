@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Ardy | Login</title>
+    <title>Ardy | Community Project Access</title>
     <link rel="stylesheet" href="index_style.css">
 </head>
 <body>
@@ -24,17 +24,18 @@
                 <div class="logo-row">
                     <img src="LOGO.svg" alt="Ardy logo" class="logo-mark">
                     <div>
-                        <h2>Sign in</h2>
-                        <p id="stageSubtitle">Enter your access password to continue.</p>
+                        <h2>Project Access</h2>
+                        <p id="stageSubtitle">Enter your project access code to continue.</p>
                     </div>
                 </div>
+                <p class="auth-notice">Use only your project access code. This page will never ask for your Arduino, Google, email, or bank password.</p>
 
                 <form id="loginForm" class="login-form">
-                    <label for="password">Password</label>
-                    <input type="password" id="password" placeholder="Enter password" autocomplete="current-password" required>
-                    <button type="submit" id="loginBtn">Continue</button>
+                    <label for="password">Project Access Code</label>
+                    <input type="password" id="password" placeholder="Enter project access code" autocomplete="off" required>
+                    <button type="submit" id="loginBtn">Enter Workspace</button>
                 </form>
-                <button type="button" id="faceSignInBtn" class="ghost-btn">Sign in with Face Scan</button>
+                <button type="button" id="faceSignInBtn" class="ghost-btn">Continue with Face Scan</button>
 
                 <section id="faceSection" class="face-section hidden" aria-live="polite">
                     <div class="scan-shell">

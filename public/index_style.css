@@ -140,6 +140,17 @@ body {
   font-size: 0.86rem;
 }
 
+.auth-notice {
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  border: 1px solid #f0d49a;
+  background: #fff9ea;
+  color: #6a4f20;
+  border-radius: 10px;
+  font-size: 0.8rem;
+  line-height: 1.35;
+}
+
 .login-form {
   display: grid;
   gap: 10px;
