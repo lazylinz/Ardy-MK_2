@@ -1,11 +1,13 @@
 const express = require('express');
 const path = require('path');
 const fs = require('fs');
+const os = require('os');
 require('dotenv').config();
 const cors = require('cors');
 const session = require('express-session');
 const https = require('https');
 const crypto = require('crypto');
+const { execFile } = require('child_process');
 const { Readable } = require('stream');
 const selfsigned = require('selfsigned');
 const { createArduinoService, registerArduinoRestRoutes } = require('./arduino-rest-handler');
@@ -82,10 +84,24 @@ const HOSTED_IMAGE_MAX_ITEMS = 300;
 const CAM_INGEST_KEY = String(process.env.CAM_INGEST_KEY || '').trim();
 const CAM_FRAME_TTL_MS = Math.max(1000, Number(process.env.CAM_FRAME_TTL_MS || 15000));
 const CAM_MAX_FRAME_BYTES = Math.max(64 * 1024, Number(process.env.CAM_MAX_FRAME_BYTES || 512 * 1024));
+const CAM_DETECT_ENABLED = String(process.env.CAM_DETECT_ENABLED || 'true').trim().toLowerCase() !== 'false';
+const CAM_DETECT_INTERVAL_MS = Math.max(800, Number(process.env.CAM_DETECT_INTERVAL_MS || 2500));
+const CAM_DETECT_BACKEND = String(process.env.CAM_DETECT_BACKEND || 'opencv-java').trim().toLowerCase();
+const OPENCV_JAVA_JAR = String(process.env.OPENCV_JAVA_JAR || '').trim();
+const OPENCV_HAAR_CASCADE = String(process.env.OPENCV_HAAR_CASCADE || '').trim();
+const OPENCV_JAVA_TIMEOUT_MS = Math.max(1500, Number(process.env.OPENCV_JAVA_TIMEOUT_MS || 12000));
+const OPENCV_JAVA_BUILD_DIR = path.join(__dirname, '.opencv-java-build');
+const OPENCV_JAVA_SOURCE_FILE = path.join(__dirname, 'opencv-java', 'PeopleCounter.java');
+const OPENCV_JAVA_CLASS_NAME = 'PeopleCounter';
 const quickSigninTokens = new Map();
 const hostedImages = new Map();
 const camMjpegClients = new Set();
 let latestCamFrame = null;
+let arduinoService = null;
+let lastCamDetectionAtMs = 0;
+let lastPublishedDetectedPeople = null;
+let opencvJavaReady = false;
+let opencvJavaReadyChecked = false;
 const MACRO_FIRING_WINDOW_MS = 5000;
 const MACRO_TICK_INTERVAL_MS = 1000;
 const GLOBAL_MACRO_RUNTIME_SESSION_ID = 'global-macro-runtime';
@@ -1303,7 +1319,127 @@ function broadcastCamFrame(frame) {
     }
 }
 
-app.post('/api/cam/push-frame', express.raw({ type: ['image/jpeg', 'application/octet-stream'], limit: `${CAM_MAX_FRAME_BYTES}b` }), (req, res) => {
+function execFileAsync(file, args, options = {}) {
+    return new Promise((resolve, reject) => {
+        execFile(file, args, options, (error, stdout, stderr) => {
+            if (error) {
+                const enriched = new Error(stderr || error.message || 'execFile failed');
+                enriched.originalError = error;
+                reject(enriched);
+                return;
+            }
+            resolve({ stdout: String(stdout || ''), stderr: String(stderr || '') });
+        });
+    });
+}
+
+async function ensureOpenCvJavaReady() {
+    if (opencvJavaReadyChecked) return opencvJavaReady;
+    opencvJavaReadyChecked = true;
+
+    if (!OPENCV_JAVA_JAR || !OPENCV_HAAR_CASCADE) {
+        console.warn('[CAM DETECT] OpenCV Java disabled: OPENCV_JAVA_JAR or OPENCV_HAAR_CASCADE is missing.');
+        opencvJavaReady = false;
+        return false;
+    }
+    if (!fs.existsSync(OPENCV_JAVA_JAR)) {
+        console.warn(`[CAM DETECT] OpenCV Java disabled: jar not found at ${OPENCV_JAVA_JAR}`);
+        opencvJavaReady = false;
+        return false;
+    }
+    if (!fs.existsSync(OPENCV_HAAR_CASCADE)) {
+        console.warn(`[CAM DETECT] OpenCV Java disabled: haar cascade not found at ${OPENCV_HAAR_CASCADE}`);
+        opencvJavaReady = false;
+        return false;
+    }
+    if (!fs.existsSync(OPENCV_JAVA_SOURCE_FILE)) {
+        console.warn(`[CAM DETECT] OpenCV Java disabled: source not found at ${OPENCV_JAVA_SOURCE_FILE}`);
+        opencvJavaReady = false;
+        return false;
+    }
+
+    fs.mkdirSync(OPENCV_JAVA_BUILD_DIR, { recursive: true });
+    try {
+        await execFileAsync('javac', ['-cp', OPENCV_JAVA_JAR, '-d', OPENCV_JAVA_BUILD_DIR, OPENCV_JAVA_SOURCE_FILE], {
+            timeout: OPENCV_JAVA_TIMEOUT_MS
+        });
+        opencvJavaReady = true;
+        console.log('[CAM DETECT] OpenCV Java detector compiled successfully.');
+    } catch (error) {
+        console.error(`[CAM DETECT] javac failed: ${error.message}`);
+        opencvJavaReady = false;
+    }
+    return opencvJavaReady;
+}
+
+async function detectPeopleCountWithOpenCvJava(frameBuffer) {
+    const ready = await ensureOpenCvJavaReady();
+    if (!ready) {
+        throw new Error('OpenCV Java detector is not ready.');
+    }
+
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cam-frame-'));
+    const imagePath = path.join(tempDir, 'frame.jpg');
+    try {
+        fs.writeFileSync(imagePath, frameBuffer);
+        const classpath = `${OPENCV_JAVA_BUILD_DIR}${path.delimiter}${OPENCV_JAVA_JAR}`;
+        const { stdout } = await execFileAsync(
+            'java',
+            ['-cp', classpath, OPENCV_JAVA_CLASS_NAME, imagePath, OPENCV_HAAR_CASCADE],
+            { timeout: OPENCV_JAVA_TIMEOUT_MS }
+        );
+        const raw = String(stdout || '').trim();
+        const match = raw.match(/\b(\d{1,3})\b/);
+        if (!match) {
+            throw new Error(`Invalid detector output: ${raw || 'empty'}`);
+        }
+        const count = Number(match[1]);
+        if (!Number.isFinite(count) || count < 0) {
+            throw new Error(`Invalid detector count: ${raw}`);
+        }
+        return count;
+    } finally {
+        try {
+            fs.rmSync(tempDir, { recursive: true, force: true });
+        } catch (error) {
+            // no-op
+        }
+    }
+}
+
+async function detectPeopleCountFromFrame(frameBuffer) {
+    if (CAM_DETECT_BACKEND === 'opencv-java') {
+        return detectPeopleCountWithOpenCvJava(frameBuffer);
+    }
+    throw new Error(`Unsupported CAM_DETECT_BACKEND: ${CAM_DETECT_BACKEND}`);
+}
+
+async function detectAndPublishPeopleCount(frameBuffer) {
+    if (!CAM_DETECT_ENABLED) return { attempted: false, skipped: 'disabled' };
+    if (!arduinoService) return { attempted: false, skipped: 'arduino-service-unavailable' };
+
+    const now = Date.now();
+    if (now - lastCamDetectionAtMs < CAM_DETECT_INTERVAL_MS) {
+        return { attempted: false, skipped: 'interval' };
+    }
+    lastCamDetectionAtMs = now;
+
+    const detectedPeople = await detectPeopleCountFromFrame(frameBuffer);
+    const changed = detectedPeople !== lastPublishedDetectedPeople;
+    if (changed) {
+        await arduinoService.writeVariable({
+            sessionId: GLOBAL_MACRO_RUNTIME_SESSION_ID,
+            name: 'detectedPeople',
+            value: detectedPeople,
+            sourceMacroId: 'cam-opencv-java',
+            sourceMacroName: 'cam-opencv-java'
+        });
+        lastPublishedDetectedPeople = detectedPeople;
+    }
+    return { attempted: true, detectedPeople, changed };
+}
+
+app.post('/api/cam/push-frame', express.raw({ type: ['image/jpeg', 'application/octet-stream'], limit: `${CAM_MAX_FRAME_BYTES}b` }), async (req, res) => {
     if (!hasValidCamIngestKey(req)) {
         return res.status(401).json({ error: { message: 'Invalid camera ingest key.' } });
     }
@@ -1326,10 +1462,19 @@ app.post('/api/cam/push-frame', express.raw({ type: ['image/jpeg', 'application/
     };
     broadcastCamFrame(latestCamFrame);
 
+    let detection = { attempted: false, skipped: 'disabled' };
+    try {
+        detection = await detectAndPublishPeopleCount(frameBuffer);
+    } catch (error) {
+        detection = { attempted: true, error: error.message };
+        console.error(`[CAM DETECT] ${error.message}`);
+    }
+
     return res.json({
         ok: true,
         bytes: frameBuffer.length,
-        receivedAt: new Date(latestCamFrame.receivedAt).toISOString()
+        receivedAt: new Date(latestCamFrame.receivedAt).toISOString(),
+        detection
     });
 });
 
@@ -1469,7 +1614,7 @@ app.post('/api/visit-site', requireWhitelistedIp, requireAuth, async (req, res) 
     }
 });
 
-const arduinoService = createArduinoService({
+arduinoService = createArduinoService({
     dataDir,
     onVariableWrite: handleMacroVariableWriteEvent
 });
