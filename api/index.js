@@ -1699,13 +1699,16 @@ function detectLargestFaceRect(cv, grayMat, classifier) {
         const area = rect.width * rect.height;
         if (area > largestArea) {
             largestArea = area;
-            largest = rect;
+            largest = {
+                x: rect.x,
+                y: rect.y,
+                width: rect.width,
+                height: rect.height
+            };
         }
     }
 
     faces.delete();
-    minSize.delete();
-    maxSize.delete();
     return largest;
 }
 
@@ -1775,8 +1778,6 @@ async function detectPeopleCountWithOpenCvJs(frameBuffer) {
         classifier.detectMultiScale(gray, faces, 1.1, 4, 0, minSize, maxSize);
         const count = faces.size();
         faces.delete();
-        minSize.delete();
-        maxSize.delete();
         return Math.max(0, Number(count || 0));
     } finally {
         classifier.delete();
