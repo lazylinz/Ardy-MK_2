@@ -93,6 +93,10 @@ const OPENCV_JAVA_TIMEOUT_MS = Math.max(1500, Number(process.env.OPENCV_JAVA_TIM
 const OPENCV_JAVA_BUILD_DIR = path.join(__dirname, '.opencv-java-build');
 const OPENCV_JAVA_SOURCE_FILE = path.join(__dirname, 'opencv-java', 'PeopleCounter.java');
 const OPENCV_JAVA_CLASS_NAME = 'PeopleCounter';
+const OPENCV_FACE_AUTH_CLASS_NAME = 'FaceAuthProcessor';
+const FACE_OPENCV_MAX_IMAGES = Math.max(1, Number(process.env.FACE_OPENCV_MAX_IMAGES || 6));
+const FACE_OPENCV_MATCH_THRESHOLD = Number(process.env.FACE_OPENCV_MATCH_THRESHOLD || 0.62);
+const FACE_OPENCV_MARGIN = Number(process.env.FACE_OPENCV_MARGIN || 0.045);
 const quickSigninTokens = new Map();
 const hostedImages = new Map();
 const camMjpegClients = new Set();
@@ -704,6 +708,77 @@ function sanitizeNickname(rawNickname) {
     return cleaned.slice(0, 32);
 }
 
+function sanitizeOpenCvVector(rawVector) {
+    if (!Array.isArray(rawVector)) return null;
+    const normalized = rawVector
+        .map((value) => Number(value))
+        .filter((value) => Number.isFinite(value))
+        .map((value) => Math.max(-10, Math.min(10, value)));
+    if (normalized.length < 64) return null;
+    return normalized.slice(0, 512);
+}
+
+function sanitizeOpenCvVectorSet(raw) {
+    const source = Array.isArray(raw) ? raw : [raw];
+    const vectors = [];
+    for (const entry of source) {
+        const vector = sanitizeOpenCvVector(entry);
+        if (vector) vectors.push(vector);
+    }
+    return vectors.slice(0, FACE_OPENCV_MAX_IMAGES);
+}
+
+function averageOpenCvVectors(vectors) {
+    if (!Array.isArray(vectors) || !vectors.length) return null;
+    const first = sanitizeOpenCvVector(vectors[0]);
+    if (!first) return null;
+    const length = first.length;
+    const sum = new Array(length).fill(0);
+    let count = 0;
+    for (const raw of vectors) {
+        const vector = sanitizeOpenCvVector(raw);
+        if (!vector || vector.length !== length) continue;
+        for (let i = 0; i < length; i += 1) sum[i] += vector[i];
+        count += 1;
+    }
+    if (!count) return null;
+    return sum.map((value) => value / count);
+}
+
+function openCvVectorDistance(vectorA, vectorB) {
+    if (!Array.isArray(vectorA) || !Array.isArray(vectorB)) return Number.POSITIVE_INFINITY;
+    const dims = Math.min(vectorA.length, vectorB.length);
+    if (dims < 64) return Number.POSITIVE_INFINITY;
+    let sum = 0;
+    for (let i = 0; i < dims; i += 1) {
+        const delta = Number(vectorA[i]) - Number(vectorB[i]);
+        sum += delta * delta;
+    }
+    return Math.sqrt(sum / dims);
+}
+
+function normalizeOpenCvProfile(entry) {
+    const setFromProfile = sanitizeOpenCvVectorSet(entry?.opencvProfile?.samples || []);
+    const setDirect = sanitizeOpenCvVectorSet(entry?.opencvVectors || []);
+    const single = sanitizeOpenCvVector(entry?.opencvVector);
+    const merged = [];
+
+    for (const vector of [...setFromProfile, ...setDirect, ...(single ? [single] : [])]) {
+        const duplicate = merged.some((existing) => openCvVectorDistance(existing, vector) <= 0.04);
+        if (!duplicate) merged.push(vector);
+        if (merged.length >= FACE_OPENCV_MAX_IMAGES) break;
+    }
+    if (!merged.length) return null;
+
+    const centroid = averageOpenCvVectors(merged);
+    if (!centroid) return null;
+    return {
+        version: 1,
+        samples: merged,
+        centroid
+    };
+}
+
 function faceDistance(descriptorA, descriptorB) {
     if (!Array.isArray(descriptorA) || !Array.isArray(descriptorB)) return Number.POSITIVE_INFINITY;
     const dims = Math.min(descriptorA.length, descriptorB.length);
@@ -793,14 +868,18 @@ function readFaceProfileStore() {
                     const id = String(entry?.id || '').trim();
                     const nickname = sanitizeNickname(entry?.nickname);
                     const faceProfile = normalizeFaceProfile(entry);
-                    if (!id || !nickname || !faceProfile) return null;
+                    const opencvProfile = normalizeOpenCvProfile(entry);
+                    if (!id || !nickname || (!faceProfile && !opencvProfile)) return null;
                     return {
                         id,
                         nickname,
                         faceProfile,
+                        opencvProfile,
                         // Compatibility alias for old code paths.
-                        faceDescriptor: faceProfile.centroid,
-                        faceDescriptors: faceProfile.samples,
+                        faceDescriptor: faceProfile?.centroid || null,
+                        faceDescriptors: faceProfile?.samples || [],
+                        opencvVector: opencvProfile?.centroid || null,
+                        opencvVectors: opencvProfile?.samples || [],
                         createdAt: Number.isFinite(Number(entry?.createdAt)) ? Number(entry.createdAt) : Date.now(),
                         updatedAt: Number.isFinite(Number(entry?.updatedAt)) ? Number(entry.updatedAt) : Date.now(),
                         lastSeenAt: Number.isFinite(Number(entry?.lastSeenAt)) ? Number(entry.lastSeenAt) : null
@@ -819,13 +898,17 @@ function writeFaceProfileStore(store) {
         const id = String(entry?.id || '').trim();
         const nickname = sanitizeNickname(entry?.nickname);
         const faceProfile = normalizeFaceProfile(entry);
-        if (!id || !nickname || !faceProfile) return null;
+        const opencvProfile = normalizeOpenCvProfile(entry);
+        if (!id || !nickname || (!faceProfile && !opencvProfile)) return null;
         return {
             id,
             nickname,
-            faceProfile,
-            faceDescriptors: faceProfile.samples,
-            faceDescriptor: faceProfile.centroid,
+            faceProfile: faceProfile || undefined,
+            faceDescriptors: faceProfile?.samples || [],
+            faceDescriptor: faceProfile?.centroid || null,
+            opencvProfile: opencvProfile || undefined,
+            opencvVectors: opencvProfile?.samples || [],
+            opencvVector: opencvProfile?.centroid || null,
             createdAt: Number.isFinite(Number(entry?.createdAt)) ? Number(entry.createdAt) : Date.now(),
             updatedAt: Number.isFinite(Number(entry?.updatedAt)) ? Number(entry.updatedAt) : Date.now(),
             lastSeenAt: Number.isFinite(Number(entry?.lastSeenAt)) ? Number(entry.lastSeenAt) : null
@@ -923,6 +1006,71 @@ function findBestFaceCandidate(inputDescriptor) {
         ? secondBestDistance - bestMatch.distance
         : null;
     return bestMatch;
+}
+
+function findBestOpenCvCandidate(inputVector) {
+    const vector = sanitizeOpenCvVector(inputVector);
+    if (!vector) return null;
+
+    const store = readFaceProfileStore();
+    let bestMatch = null;
+    let secondBestDistance = Number.POSITIVE_INFINITY;
+    for (const user of store.users) {
+        const profile = normalizeOpenCvProfile(user);
+        if (!profile) continue;
+        const distance = openCvVectorDistance(vector, profile.centroid);
+        if (!Number.isFinite(distance)) continue;
+        if (!bestMatch || distance < bestMatch.distance) {
+            if (bestMatch && Number.isFinite(bestMatch.distance)) {
+                secondBestDistance = Math.min(secondBestDistance, bestMatch.distance);
+            }
+            bestMatch = { user, distance };
+        } else {
+            secondBestDistance = Math.min(secondBestDistance, distance);
+        }
+    }
+    if (!bestMatch) return null;
+    bestMatch.margin = Number.isFinite(secondBestDistance)
+        ? secondBestDistance - bestMatch.distance
+        : null;
+    return bestMatch;
+}
+
+function findBestOpenCvMatch(inputVector) {
+    const candidate = findBestOpenCvCandidate(inputVector);
+    if (!candidate) return null;
+    if (candidate.distance > FACE_OPENCV_MATCH_THRESHOLD) return null;
+    if (candidate.margin !== null && candidate.margin < FACE_OPENCV_MARGIN) return null;
+    return candidate;
+}
+
+async function getOpenCvProbeFromRequestImages(body) {
+    const incoming = Array.isArray(body?.images) ? body.images : (body?.image ? [body.image] : []);
+    const imageStrings = incoming
+        .map((item) => String(item || '').trim())
+        .filter(Boolean)
+        .slice(0, FACE_OPENCV_MAX_IMAGES);
+    if (!imageStrings.length) return null;
+
+    const vectors = [];
+    for (const imageText of imageStrings) {
+        const dataPart = imageText.includes(',') ? imageText.split(',').pop() : imageText;
+        if (!dataPart) continue;
+        let imageBuffer = null;
+        try {
+            imageBuffer = Buffer.from(dataPart, 'base64');
+        } catch (error) {
+            imageBuffer = null;
+        }
+        if (!imageBuffer || imageBuffer.length < 128) continue;
+        const vector = await extractFaceVectorWithOpenCvJava(imageBuffer);
+        const sanitized = sanitizeOpenCvVector(vector);
+        if (sanitized) vectors.push(sanitized);
+    }
+    if (!vectors.length) return null;
+    const centroid = averageOpenCvVectors(vectors);
+    if (!centroid) return null;
+    return { vector: centroid, vectors };
 }
 
 function refreshFaceProfileWithDescriptor(user, descriptor) {
@@ -1030,6 +1178,56 @@ app.post('/login/face', (req, res) => {
     });
 });
 
+app.post('/login/face-opencv', async (req, res) => {
+    try {
+        const probe = await getOpenCvProbeFromRequestImages(req.body);
+        if (!probe?.vector) {
+            return res.status(400).json({ success: false, message: 'No valid face image was detected.' });
+        }
+        const bestMatch = findBestOpenCvMatch(probe.vector);
+        if (!bestMatch) {
+            return res.status(404).json({
+                success: false,
+                code: 'FACE_NOT_RECOGNIZED',
+                message: 'Face not recognized. Please enroll as a new user.'
+            });
+        }
+
+        establishAuthenticatedRequest(req, res, bestMatch.user.id);
+        const store = readFaceProfileStore();
+        const idx = store.users.findIndex((entry) => entry.id === bestMatch.user.id);
+        if (idx >= 0) {
+            const now = Date.now();
+            const existingProfile = normalizeOpenCvProfile(store.users[idx]) || { samples: [], centroid: probe.vector };
+            const samples = [...existingProfile.samples];
+            const isDuplicate = samples.some((entry) => openCvVectorDistance(entry, probe.vector) <= 0.04);
+            if (!isDuplicate) samples.push(probe.vector);
+            const trimmed = samples.slice(-FACE_OPENCV_MAX_IMAGES);
+            store.users[idx] = {
+                ...store.users[idx],
+                opencvProfile: {
+                    version: 1,
+                    samples: trimmed,
+                    centroid: averageOpenCvVectors(trimmed) || probe.vector
+                },
+                opencvVectors: trimmed,
+                opencvVector: averageOpenCvVectors(trimmed) || probe.vector,
+                lastSeenAt: now,
+                updatedAt: now
+            };
+            writeFaceProfileStore(store);
+        }
+
+        return res.json({
+            success: true,
+            userId: bestMatch.user.id,
+            nickname: bestMatch.user.nickname
+        });
+    } catch (error) {
+        return res.status(500).json({ success: false, message: error.message });
+    }
+});
+
 app.post('/login/enroll', (req, res) => {
     const probe = getFaceProbeFromRequest(req.body);
     const nickname = sanitizeNickname(req.body?.nickname);
@@ -1093,6 +1291,71 @@ app.post('/login/enroll', (req, res) => {
         userId,
         nickname
     });
+});
+
+app.post('/login/enroll-opencv', async (req, res) => {
+    try {
+        const probe = await getOpenCvProbeFromRequestImages(req.body);
+        const nickname = sanitizeNickname(req.body?.nickname);
+        const password = String(req.body?.password || '');
+        const isPasswordAllowed = password === PASSWORD || hasRecentPasswordVerification(req);
+
+        if (!isPasswordAllowed) {
+            return res.status(401).json({
+                success: false,
+                message: 'Password verification required before enrollment.'
+            });
+        }
+        if (!probe?.vector || !Array.isArray(probe.vectors) || !probe.vectors.length) {
+            return res.status(400).json({ success: false, message: 'No valid face image was detected for enrollment.' });
+        }
+        if (!nickname || !/^[A-Za-z0-9 _.-]{2,32}$/.test(nickname)) {
+            return res.status(400).json({
+                success: false,
+                message: 'Nickname must be 2-32 chars and use letters, numbers, spaces, ., _, or -.'
+            });
+        }
+
+        const existing = findBestOpenCvMatch(probe.vector);
+        if (existing) {
+            return res.status(409).json({
+                success: false,
+                message: 'This face is already enrolled.',
+                userId: existing.user.id,
+                nickname: existing.user.nickname
+            });
+        }
+
+        const store = readFaceProfileStore();
+        const now = Date.now();
+        const userId = `user_${crypto.randomBytes(8).toString('hex')}`;
+        const samples = probe.vectors.slice(0, FACE_OPENCV_MAX_IMAGES);
+        const centroid = averageOpenCvVectors(samples) || probe.vector;
+        store.users.push({
+            id: userId,
+            nickname,
+            opencvProfile: {
+                version: 1,
+                samples,
+                centroid
+            },
+            opencvVectors: samples,
+            opencvVector: centroid,
+            createdAt: now,
+            updatedAt: now,
+            lastSeenAt: now
+        });
+        writeFaceProfileStore(store);
+
+        establishAuthenticatedRequest(req, res, userId);
+        return res.json({
+            success: true,
+            userId,
+            nickname
+        });
+    } catch (error) {
+        return res.status(500).json({ success: false, message: error.message });
+    }
 });
 
 app.get('/logout', (req, res) => {
@@ -1358,9 +1621,21 @@ async function ensureOpenCvJavaReady() {
         return false;
     }
 
+    const javaSourceDir = path.join(__dirname, 'opencv-java');
+    const javaSources = fs.existsSync(javaSourceDir)
+        ? fs.readdirSync(javaSourceDir)
+            .filter((name) => String(name).toLowerCase().endsWith('.java'))
+            .map((name) => path.join(javaSourceDir, name))
+        : [];
+    if (!javaSources.length) {
+        console.warn('[CAM DETECT] OpenCV Java disabled: no .java sources found in api/opencv-java');
+        opencvJavaReady = false;
+        return false;
+    }
+
     fs.mkdirSync(OPENCV_JAVA_BUILD_DIR, { recursive: true });
     try {
-        await execFileAsync('javac', ['-cp', OPENCV_JAVA_JAR, '-d', OPENCV_JAVA_BUILD_DIR, OPENCV_JAVA_SOURCE_FILE], {
+        await execFileAsync('javac', ['-cp', OPENCV_JAVA_JAR, '-d', OPENCV_JAVA_BUILD_DIR, ...javaSources], {
             timeout: OPENCV_JAVA_TIMEOUT_MS
         });
         opencvJavaReady = true;
@@ -1370,6 +1645,50 @@ async function ensureOpenCvJavaReady() {
         opencvJavaReady = false;
     }
     return opencvJavaReady;
+}
+
+function parseFaceAuthJson(rawStdout) {
+    const raw = String(rawStdout || '').trim();
+    if (!raw) throw new Error('FaceAuthProcessor returned empty output.');
+    let parsed = null;
+    try {
+        parsed = JSON.parse(raw);
+    } catch (error) {
+        throw new Error(`FaceAuthProcessor invalid JSON: ${raw.slice(0, 160)}`);
+    }
+    if (!parsed?.ok) {
+        throw new Error(String(parsed?.error || 'FaceAuthProcessor failed'));
+    }
+    if (!Array.isArray(parsed?.vector) || !parsed.vector.length) {
+        throw new Error('FaceAuthProcessor vector is missing.');
+    }
+    return parsed.vector.map((v) => Number(v)).filter((v) => Number.isFinite(v));
+}
+
+async function extractFaceVectorWithOpenCvJava(frameBuffer) {
+    const ready = await ensureOpenCvJavaReady();
+    if (!ready) {
+        throw new Error('OpenCV Java detector is not ready.');
+    }
+
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'face-auth-'));
+    const imagePath = path.join(tempDir, 'face.jpg');
+    try {
+        fs.writeFileSync(imagePath, frameBuffer);
+        const classpath = `${OPENCV_JAVA_BUILD_DIR}${path.delimiter}${OPENCV_JAVA_JAR}`;
+        const { stdout } = await execFileAsync(
+            'java',
+            ['-cp', classpath, OPENCV_FACE_AUTH_CLASS_NAME, imagePath, OPENCV_HAAR_CASCADE],
+            { timeout: OPENCV_JAVA_TIMEOUT_MS }
+        );
+        return parseFaceAuthJson(stdout);
+    } finally {
+        try {
+            fs.rmSync(tempDir, { recursive: true, force: true });
+        } catch (error) {
+            // no-op
+        }
+    }
 }
 
 async function detectPeopleCountWithOpenCvJava(frameBuffer) {

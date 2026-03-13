@@ -14,15 +14,10 @@ const nicknameForm = document.getElementById('nicknameForm');
 const nicknameInput = document.getElementById('nickname');
 const enrollBtn = document.getElementById('enrollBtn');
 
-const FACE_MODEL_URI = 'https://cdn.jsdelivr.net/npm/@vladmandic/face-api/model/';
-const FACE_SAMPLES_REQUIRED = 8;
-const FACE_SAMPLES_MIN_ACCEPTED = 5;
-const FACE_SCAN_MAX_ATTEMPTS = 120;
-const FACE_SCAN_INTERVAL_MS = 180;
-const FACE_MIN_DETECTION_SCORE = 0.72;
-const FACE_MIN_BOX_RATIO = 0.08;
-const FACE_MAX_OUTLIER_DISTANCE = 0.55;
-const FACE_MIN_VARIATION_DISTANCE = 0.035;
+const FACE_CAPTURE_TARGET_SAMPLES = 5;
+const FACE_CAPTURE_MIN_SAMPLES = 3;
+const FACE_CAPTURE_MAX_ATTEMPTS = 40;
+const FACE_CAPTURE_INTERVAL_MS = 220;
 
 const state = {
   mode: 'password',
@@ -31,8 +26,7 @@ const state = {
   stream: null,
   cameraStarting: null,
   scanInProgress: false,
-  modelsReady: false,
-  modelsLoading: null,
+  captureCanvas: null,
 };
 
 function setMessage(text, type) {
@@ -48,20 +42,24 @@ function setLoading(button, isLoading, loadingText, defaultText) {
 
 function getCameraErrorMessage(err) {
   const name = String(err?.name || '').toLowerCase();
-  const message = String(err?.message || '').trim();
+  const text = String(err?.message || '').trim();
   if (name === 'notallowederror' || name === 'securityerror') {
     return 'Camera permission was denied. Allow camera access and try again.';
   }
   if (name === 'notfounderror' || name === 'devicesnotfounderror') {
     return 'No camera device was found on this system.';
   }
-  if (name === 'notreadableerror' || /could not start video source/i.test(message)) {
+  if (name === 'notreadableerror' || /could not start video source/i.test(text)) {
     return 'Camera is busy or blocked by another app/tab. Close other camera apps and retry.';
   }
   if (name === 'overconstrainederror') {
     return 'Camera constraints were unsupported. Retrying with a basic camera profile is required.';
   }
-  return message || 'Unable to access camera.';
+  return text || 'Unable to access camera.';
+}
+
+function wait(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function setStage(stage) {
@@ -87,30 +85,7 @@ function setStage(stage) {
     });
   } else if (isNickname) {
     stageSubtitle.textContent = 'New face detected. Choose your nickname to create your profile.';
-    stopCamera();
   }
-}
-
-async function loadFaceModels() {
-  if (state.modelsReady) return;
-  if (state.modelsLoading) {
-    await state.modelsLoading;
-    return;
-  }
-
-  if (!window.faceapi) {
-    throw new Error('Face engine failed to load. Refresh and try again.');
-  }
-
-  state.modelsLoading = Promise.all([
-    faceapi.nets.tinyFaceDetector.loadFromUri(FACE_MODEL_URI),
-    faceapi.nets.faceLandmark68Net.loadFromUri(FACE_MODEL_URI),
-    faceapi.nets.faceRecognitionNet.loadFromUri(FACE_MODEL_URI)
-  ]).then(() => {
-    state.modelsReady = true;
-  });
-
-  await state.modelsLoading;
 }
 
 async function startCamera() {
@@ -145,10 +120,11 @@ async function startCamera() {
         state.stream = stream;
         faceVideo.srcObject = stream;
         await faceVideo.play().catch(() => undefined);
+        await wait(250);
         return;
       } catch (err) {
         lastError = err;
-        await new Promise((resolve) => setTimeout(resolve, 150));
+        await wait(150);
       }
     }
     throw new Error(getCameraErrorMessage(lastError));
@@ -168,123 +144,53 @@ function stopCamera() {
   faceVideo.srcObject = null;
 }
 
-function averageDescriptors(descriptors) {
-  const length = descriptors[0].length;
-  const avg = new Array(length).fill(0);
-
-  for (const descriptor of descriptors) {
-    for (let i = 0; i < length; i += 1) {
-      avg[i] += descriptor[i];
-    }
-  }
-  for (let i = 0; i < length; i += 1) {
-    avg[i] /= descriptors.length;
-  }
-  return avg;
+function ensureCaptureCanvas() {
+  if (state.captureCanvas) return state.captureCanvas;
+  state.captureCanvas = document.createElement('canvas');
+  return state.captureCanvas;
 }
 
-function faceDistance(descriptorA, descriptorB) {
-  if (!Array.isArray(descriptorA) || !Array.isArray(descriptorB)) return Number.POSITIVE_INFINITY;
-  const dims = Math.min(descriptorA.length, descriptorB.length);
-  if (dims < 32) return Number.POSITIVE_INFINITY;
-  let sum = 0;
-  for (let i = 0; i < dims; i += 1) {
-    const delta = Number(descriptorA[i]) - Number(descriptorB[i]);
-    sum += delta * delta;
-  }
-  return Math.sqrt(sum);
+function captureFrameAsDataUrl() {
+  const videoWidth = Number(faceVideo?.videoWidth || 0);
+  const videoHeight = Number(faceVideo?.videoHeight || 0);
+  if (!videoWidth || !videoHeight) return '';
+
+  const canvas = ensureCaptureCanvas();
+  canvas.width = Math.max(160, Math.min(640, videoWidth));
+  canvas.height = Math.max(120, Math.min(480, videoHeight));
+
+  const ctx = canvas.getContext('2d', { willReadFrequently: false });
+  if (!ctx) return '';
+  ctx.drawImage(faceVideo, 0, 0, canvas.width, canvas.height);
+  return canvas.toDataURL('image/jpeg', 0.82);
 }
 
-function getFaceBoxRatio(detection) {
-  const box = detection?.detection?.box;
-  const width = Number(faceVideo?.videoWidth || 0);
-  const height = Number(faceVideo?.videoHeight || 0);
-  if (!box || !width || !height) return 0;
-  const boxWidth = Math.max(0, Number(box.width || 0));
-  const boxHeight = Math.max(0, Number(box.height || 0));
-  return (boxWidth * boxHeight) / (width * height);
-}
-
-function wait(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-async function captureFaceSignature() {
-  await loadFaceModels();
+async function collectFaceImages() {
   await startCamera();
 
-  const options = new faceapi.TinyFaceDetectorOptions({
-    inputSize: 224,
-    scoreThreshold: 0.55
-  });
-
-  const descriptors = [];
-  let misses = 0;
-
-  for (let attempt = 0; attempt < FACE_SCAN_MAX_ATTEMPTS; attempt += 1) {
-    const detection = await faceapi
-      .detectSingleFace(faceVideo, options)
-      .withFaceLandmarks()
-      .withFaceDescriptor();
-
-    const score = Number(detection?.detection?.score || 0);
-    const boxRatio = getFaceBoxRatio(detection);
-
-    if (detection?.descriptor && score >= FACE_MIN_DETECTION_SCORE && boxRatio >= FACE_MIN_BOX_RATIO) {
-      const sample = Array.from(detection.descriptor);
-      const rollingDescriptor = descriptors.length ? averageDescriptors(descriptors) : null;
-      if (rollingDescriptor) {
-        const drift = faceDistance(sample, rollingDescriptor);
-        if (Number.isFinite(drift) && drift > FACE_MAX_OUTLIER_DISTANCE) {
-          setMessage('Hold a steady angle and keep your whole face in frame.', 'ok');
-          await wait(FACE_SCAN_INTERVAL_MS);
-          continue;
-        }
-      }
-      if (descriptors.length) {
-        const last = descriptors[descriptors.length - 1];
-        const variation = faceDistance(last, sample);
-        if (Number.isFinite(variation) && variation < FACE_MIN_VARIATION_DISTANCE) {
-          await wait(FACE_SCAN_INTERVAL_MS);
-          continue;
-        }
-      }
-
-      descriptors.push(sample);
-      setMessage(`Collecting stable frames (${descriptors.length}/${FACE_SAMPLES_REQUIRED})...`, 'ok');
-      if (descriptors.length >= FACE_SAMPLES_REQUIRED) {
-        return {
-          descriptor: averageDescriptors(descriptors),
-          descriptors
-        };
-      }
-      misses = 0;
-    } else {
-      misses += 1;
-      if (misses > 10) {
-        setMessage('Center your full face in the ring with brighter lighting.', 'ok');
-      }
+  const images = [];
+  for (let attempt = 0; attempt < FACE_CAPTURE_MAX_ATTEMPTS; attempt += 1) {
+    const frame = captureFrameAsDataUrl();
+    if (frame && frame.length > 200) {
+      images.push(frame);
+      setMessage(`Capturing face frames (${images.length}/${FACE_CAPTURE_TARGET_SAMPLES})...`, 'ok');
+      if (images.length >= FACE_CAPTURE_TARGET_SAMPLES) break;
     }
-
-    await wait(FACE_SCAN_INTERVAL_MS);
+    await wait(FACE_CAPTURE_INTERVAL_MS);
   }
 
-  if (descriptors.length >= FACE_SAMPLES_MIN_ACCEPTED) {
-    return {
-      descriptor: averageDescriptors(descriptors),
-      descriptors
-    };
+  if (images.length < FACE_CAPTURE_MIN_SAMPLES) {
+    throw new Error('No stable face capture. Keep your face centered and retry.');
   }
-  throw new Error('No stable face detected. Ensure your face is centered and well-lit.');
+  return { images };
 }
 
-async function loginByFace(faceCapture) {
-  const descriptor = Array.isArray(faceCapture?.descriptor) ? faceCapture.descriptor : null;
-  const descriptors = Array.isArray(faceCapture?.descriptors) ? faceCapture.descriptors : [];
-  const res = await fetch('/login/face', {
+async function loginByFaceOpenCv(faceCapture) {
+  const images = Array.isArray(faceCapture?.images) ? faceCapture.images : [];
+  const res = await fetch('/login/face-opencv', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ descriptor, descriptors })
+    body: JSON.stringify({ images })
   });
 
   let data = {};
@@ -351,10 +257,10 @@ scanFaceBtn.addEventListener('click', async () => {
   setLoading(scanFaceBtn, true, 'Scanning...', 'Scan Face');
 
   try {
-    const faceCapture = await captureFaceSignature();
+    const faceCapture = await collectFaceImages();
     state.faceCapture = faceCapture;
 
-    const result = await loginByFace(faceCapture);
+    const result = await loginByFaceOpenCv(faceCapture);
     if (result.ok) {
       redirectToChat();
       return;
@@ -384,7 +290,7 @@ nicknameForm.addEventListener('submit', async (e) => {
   e.preventDefault();
   const nickname = nicknameInput.value.trim();
 
-  if (!state.faceCapture?.descriptor) {
+  if (!Array.isArray(state.faceCapture?.images) || !state.faceCapture.images.length) {
     setMessage('Face data missing. Please run face scan again.', 'error');
     setStage('face');
     return;
@@ -394,13 +300,12 @@ nicknameForm.addEventListener('submit', async (e) => {
   setMessage('', '');
 
   try {
-    const res = await fetch('/login/enroll', {
+    const res = await fetch('/login/enroll-opencv', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         nickname,
-        descriptor: state.faceCapture.descriptor,
-        descriptors: state.faceCapture.descriptors
+        images: state.faceCapture.images
       })
     });
 
@@ -418,12 +323,15 @@ nicknameForm.addEventListener('submit', async (e) => {
 });
 
 backBtn.addEventListener('click', () => {
-  setMessage('', '');
-  state.afterPasswordGate = false;
   state.faceCapture = null;
-  setStage('password');
+  if (state.afterPasswordGate) {
+    setStage('password');
+    setMessage('Face scan was cancelled.', 'ok');
+  } else {
+    setStage('password');
+    setMessage('', '');
+  }
 });
 
 window.addEventListener('beforeunload', stopCamera);
-
 setStage('password');
