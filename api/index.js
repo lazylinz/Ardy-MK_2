@@ -87,6 +87,13 @@ const CAM_DETECT_ENABLED = String(process.env.CAM_DETECT_ENABLED || 'true').trim
 const CAM_DETECT_INTERVAL_MS = Math.max(800, Number(process.env.CAM_DETECT_INTERVAL_MS || 2500));
 const CAM_DETECT_BACKEND = String(process.env.CAM_DETECT_BACKEND || 'opencv-js').trim().toLowerCase();
 const OPENCV_JS_HAAR_CASCADE = String(process.env.OPENCV_JS_HAAR_CASCADE || process.env.OPENCV_HAAR_CASCADE || '').trim();
+const OPENCV_CASCADE_FILENAME = 'haarcascade_frontalface_default.xml';
+const OPENCV_CASCADE_BUNDLED_PATH = path.join(__dirname, OPENCV_CASCADE_FILENAME);
+const OPENCV_CASCADE_TMP_PATH = path.join('/tmp', OPENCV_CASCADE_FILENAME);
+const OPENCV_CASCADE_DOWNLOAD_URL = String(
+    process.env.OPENCV_CASCADE_DOWNLOAD_URL
+    || 'https://raw.githubusercontent.com/opencv/opencv/master/data/haarcascades/haarcascade_frontalface_default.xml'
+).trim();
 const FACE_OPENCV_MAX_IMAGES = Math.max(1, Number(process.env.FACE_OPENCV_MAX_IMAGES || 6));
 const FACE_OPENCV_MATCH_THRESHOLD = Number(process.env.FACE_OPENCV_MATCH_THRESHOLD || 0.62);
 const FACE_OPENCV_MARGIN = Number(process.env.FACE_OPENCV_MARGIN || 0.045);
@@ -100,8 +107,11 @@ let lastPublishedDetectedPeople = null;
 let opencvJsReady = false;
 let opencvJsReadyChecked = false;
 let opencvJsCascadePath = '/haarcascade_frontalface_default.xml';
+let opencvJsCascadeHostPath = '';
 let cvInstance = null;
 let cvLoadPromise = null;
+let opencvJsLastInitAttemptAt = 0;
+let opencvJsLastInitError = '';
 const MACRO_FIRING_WINDOW_MS = 5000;
 const MACRO_TICK_INTERVAL_MS = 1000;
 const GLOBAL_MACRO_RUNTIME_SESSION_ID = 'global-macro-runtime';
@@ -1593,23 +1603,57 @@ async function loadOpenCvJs() {
             return cv;
         })();
     }
-    cvInstance = await cvLoadPromise;
+    try {
+        cvInstance = await cvLoadPromise;
+    } catch (error) {
+        // Allow future retries if initial WASM/module load failed.
+        cvLoadPromise = null;
+        cvInstance = null;
+        throw error;
+    }
     return cvInstance;
 }
 
 async function ensureOpenCvJsReady() {
-    if (opencvJsReadyChecked) return opencvJsReady;
-    opencvJsReadyChecked = true;
-
-    if (!OPENCV_JS_HAAR_CASCADE || !fs.existsSync(OPENCV_JS_HAAR_CASCADE)) {
-        console.warn(`[CAM DETECT] OpenCV.js disabled: cascade not found at ${OPENCV_JS_HAAR_CASCADE || '(unset)'}`);
-        opencvJsReady = false;
+    const now = Date.now();
+    const retryWindowMs = 10000;
+    if (opencvJsReady) return true;
+    if (opencvJsReadyChecked && now - opencvJsLastInitAttemptAt < retryWindowMs) {
         return false;
     }
+    opencvJsReadyChecked = true;
+    opencvJsLastInitAttemptAt = now;
 
     try {
+        const resolveCascadePath = async () => {
+            if (OPENCV_JS_HAAR_CASCADE) {
+                if (fs.existsSync(OPENCV_JS_HAAR_CASCADE)) return OPENCV_JS_HAAR_CASCADE;
+                throw new Error(`Configured OPENCV_JS_HAAR_CASCADE not found at ${OPENCV_JS_HAAR_CASCADE}`);
+            }
+            if (fs.existsSync(OPENCV_CASCADE_BUNDLED_PATH)) {
+                return OPENCV_CASCADE_BUNDLED_PATH;
+            }
+            if (fs.existsSync(OPENCV_CASCADE_TMP_PATH)) {
+                return OPENCV_CASCADE_TMP_PATH;
+            }
+
+            const response = await fetch(OPENCV_CASCADE_DOWNLOAD_URL, { method: 'GET' });
+            if (!response.ok) {
+                throw new Error(`Cascade download failed: ${response.status} ${response.statusText}`);
+            }
+            const arrayBuffer = await response.arrayBuffer();
+            const buffer = Buffer.from(arrayBuffer);
+            if (!buffer.length) {
+                throw new Error('Cascade download returned empty payload.');
+            }
+            fs.writeFileSync(OPENCV_CASCADE_TMP_PATH, buffer);
+            return OPENCV_CASCADE_TMP_PATH;
+        };
+
+        opencvJsCascadeHostPath = await resolveCascadePath();
+
         const cv = await loadOpenCvJs();
-        const cascadeData = fs.readFileSync(OPENCV_JS_HAAR_CASCADE);
+        const cascadeData = fs.readFileSync(opencvJsCascadeHostPath);
         if (!cv.FS.analyzePath('/').exists) {
             cv.FS.mkdir('/');
         }
@@ -1618,9 +1662,11 @@ async function ensureOpenCvJsReady() {
         }
         cv.FS_createDataFile('/', path.basename(opencvJsCascadePath), cascadeData, true, false, false);
         opencvJsReady = true;
-        console.log('[CAM DETECT] OpenCV.js ready.');
+        opencvJsLastInitError = '';
+        console.log(`[CAM DETECT] OpenCV.js ready (cascade=${opencvJsCascadeHostPath}).`);
     } catch (error) {
-        console.error(`[CAM DETECT] OpenCV.js init failed: ${error.message}`);
+        opencvJsLastInitError = String(error?.message || 'init-failed');
+        console.error(`[CAM DETECT] OpenCV.js init failed: ${opencvJsLastInitError}`);
         opencvJsReady = false;
     }
     return opencvJsReady;
@@ -1967,6 +2013,20 @@ app.get('/api/server-location', requireWhitelistedIp, requireAuth, (req, res) =>
         origin,
         url: `${origin}/chat.html`,
         timestamp: new Date().toISOString()
+    });
+});
+
+app.get('/api/opencv-js/health', requireWhitelistedIp, requireAuth, async (req, res) => {
+    const ready = await ensureOpenCvJsReady();
+    return res.json({
+        ready,
+        backend: CAM_DETECT_BACKEND,
+        cascadePathConfigured: OPENCV_JS_HAAR_CASCADE || null,
+        cascadePathResolved: opencvJsCascadeHostPath || null,
+        cascadeExists: Boolean(opencvJsCascadeHostPath && fs.existsSync(opencvJsCascadeHostPath)),
+        cascadeDownloadUrl: OPENCV_CASCADE_DOWNLOAD_URL,
+        lastInitAttemptAt: opencvJsLastInitAttemptAt ? new Date(opencvJsLastInitAttemptAt).toISOString() : null,
+        lastInitError: opencvJsLastInitError || null
     });
 });
 
