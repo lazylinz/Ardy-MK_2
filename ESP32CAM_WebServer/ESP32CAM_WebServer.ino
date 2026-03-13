@@ -23,7 +23,7 @@ const char *apPassword = "12345678";
 const bool kEnableImagePush = true;
 const char *imagePushUrl = "https://ardy-mk-2.vercel.app/api/cam/push-frame";
 const char *imagePushKey = "lenard10";
-const unsigned long kImagePushIntervalMs = 1000;
+const unsigned long kImagePushIntervalMs = 100;
 
 unsigned long gLastImagePushAtMs = 0;
 unsigned long gPushAttemptCount = 0;

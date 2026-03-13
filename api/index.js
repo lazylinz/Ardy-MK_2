@@ -94,6 +94,13 @@ const OPENCV_CASCADE_DOWNLOAD_URL = String(
     process.env.OPENCV_CASCADE_DOWNLOAD_URL
     || 'https://raw.githubusercontent.com/opencv/opencv/master/data/haarcascades/haarcascade_frontalface_default.xml'
 ).trim();
+const OPENCV_BODY_CASCADE_SOURCES = String(
+    process.env.OPENCV_JS_BODY_CASCADES
+    || 'https://raw.githubusercontent.com/opencv/opencv/master/data/haarcascades/haarcascade_fullbody.xml,https://raw.githubusercontent.com/opencv/opencv/master/data/haarcascades/haarcascade_upperbody.xml,https://raw.githubusercontent.com/opencv/opencv/master/data/haarcascades/haarcascade_lowerbody.xml'
+)
+    .split(',')
+    .map((item) => item.trim())
+    .filter(Boolean);
 const FACE_OPENCV_MAX_IMAGES = Math.max(1, Number(process.env.FACE_OPENCV_MAX_IMAGES || 6));
 const FACE_OPENCV_MATCH_THRESHOLD = Number(process.env.FACE_OPENCV_MATCH_THRESHOLD || 0.62);
 const FACE_OPENCV_MARGIN = Number(process.env.FACE_OPENCV_MARGIN || 0.045);
@@ -108,6 +115,8 @@ let opencvJsReady = false;
 let opencvJsReadyChecked = false;
 let opencvJsCascadePath = '/haarcascade_frontalface_default.xml';
 let opencvJsCascadeHostPath = '';
+let opencvJsBodyCascadeFsPaths = [];
+let opencvJsBodyCascadeHostPaths = [];
 let cvInstance = null;
 let cvLoadPromise = null;
 let opencvJsLastInitAttemptAt = 0;
@@ -1625,7 +1634,41 @@ async function ensureOpenCvJsReady() {
     opencvJsLastInitAttemptAt = now;
 
     try {
-        const resolveCascadePath = async () => {
+        const resolveOneCascadePath = async (source, fallbackDownloadUrl, fallbackTmpPath) => {
+            if (source && fs.existsSync(source)) return source;
+            const urlLike = String(source || '').trim();
+            if (urlLike && /^https?:\/\//i.test(urlLike)) {
+                const response = await fetch(urlLike, { method: 'GET' });
+                if (!response.ok) {
+                    throw new Error(`Cascade download failed: ${response.status} ${response.statusText}`);
+                }
+                const arrayBuffer = await response.arrayBuffer();
+                const buffer = Buffer.from(arrayBuffer);
+                if (!buffer.length) {
+                    throw new Error('Cascade download returned empty payload.');
+                }
+                const targetPath = path.join('/tmp', path.basename(new URL(urlLike).pathname || 'cascade.xml'));
+                fs.writeFileSync(targetPath, buffer);
+                return targetPath;
+            }
+            if (fallbackTmpPath && fs.existsSync(fallbackTmpPath)) return fallbackTmpPath;
+            if (fallbackDownloadUrl) {
+                const response = await fetch(fallbackDownloadUrl, { method: 'GET' });
+                if (!response.ok) {
+                    throw new Error(`Cascade download failed: ${response.status} ${response.statusText}`);
+                }
+                const arrayBuffer = await response.arrayBuffer();
+                const buffer = Buffer.from(arrayBuffer);
+                if (!buffer.length) {
+                    throw new Error('Cascade download returned empty payload.');
+                }
+                if (fallbackTmpPath) fs.writeFileSync(fallbackTmpPath, buffer);
+                return fallbackTmpPath;
+            }
+            throw new Error(`Cascade source not found: ${source || '(empty)'}`);
+        };
+
+        const resolveFaceCascadePath = async () => {
             if (OPENCV_JS_HAAR_CASCADE) {
                 if (fs.existsSync(OPENCV_JS_HAAR_CASCADE)) return OPENCV_JS_HAAR_CASCADE;
                 throw new Error(`Configured OPENCV_JS_HAAR_CASCADE not found at ${OPENCV_JS_HAAR_CASCADE}`);
@@ -1633,24 +1676,16 @@ async function ensureOpenCvJsReady() {
             if (fs.existsSync(OPENCV_CASCADE_BUNDLED_PATH)) {
                 return OPENCV_CASCADE_BUNDLED_PATH;
             }
-            if (fs.existsSync(OPENCV_CASCADE_TMP_PATH)) {
-                return OPENCV_CASCADE_TMP_PATH;
-            }
-
-            const response = await fetch(OPENCV_CASCADE_DOWNLOAD_URL, { method: 'GET' });
-            if (!response.ok) {
-                throw new Error(`Cascade download failed: ${response.status} ${response.statusText}`);
-            }
-            const arrayBuffer = await response.arrayBuffer();
-            const buffer = Buffer.from(arrayBuffer);
-            if (!buffer.length) {
-                throw new Error('Cascade download returned empty payload.');
-            }
-            fs.writeFileSync(OPENCV_CASCADE_TMP_PATH, buffer);
-            return OPENCV_CASCADE_TMP_PATH;
+            return resolveOneCascadePath('', OPENCV_CASCADE_DOWNLOAD_URL, OPENCV_CASCADE_TMP_PATH);
         };
 
-        opencvJsCascadeHostPath = await resolveCascadePath();
+        opencvJsCascadeHostPath = await resolveFaceCascadePath();
+        opencvJsBodyCascadeHostPaths = [];
+        for (let i = 0; i < OPENCV_BODY_CASCADE_SOURCES.length; i += 1) {
+            const source = OPENCV_BODY_CASCADE_SOURCES[i];
+            const hostPath = await resolveOneCascadePath(source, '', '');
+            if (hostPath) opencvJsBodyCascadeHostPaths.push(hostPath);
+        }
 
         const cv = await loadOpenCvJs();
         const cascadeData = fs.readFileSync(opencvJsCascadeHostPath);
@@ -1661,9 +1696,24 @@ async function ensureOpenCvJsReady() {
             cv.FS.unlink(opencvJsCascadePath);
         }
         cv.FS_createDataFile('/', path.basename(opencvJsCascadePath), cascadeData, true, false, false);
+
+        opencvJsBodyCascadeFsPaths = [];
+        for (let i = 0; i < opencvJsBodyCascadeHostPaths.length; i += 1) {
+            const hostPath = opencvJsBodyCascadeHostPaths[i];
+            const fsPath = `/haarcascade_body_${i}.xml`;
+            const bodyData = fs.readFileSync(hostPath);
+            if (cv.FS.analyzePath(fsPath).exists) {
+                cv.FS.unlink(fsPath);
+            }
+            cv.FS_createDataFile('/', path.basename(fsPath), bodyData, true, false, false);
+            opencvJsBodyCascadeFsPaths.push(fsPath);
+        }
+
         opencvJsReady = true;
         opencvJsLastInitError = '';
-        console.log(`[CAM DETECT] OpenCV.js ready (cascade=${opencvJsCascadeHostPath}).`);
+        console.log(
+            `[CAM DETECT] OpenCV.js ready (face=${opencvJsCascadeHostPath}, body=${opencvJsBodyCascadeHostPaths.length}).`
+        );
     } catch (error) {
         opencvJsLastInitError = String(error?.message || 'init-failed');
         console.error(`[CAM DETECT] OpenCV.js init failed: ${opencvJsLastInitError}`);
@@ -1710,6 +1760,28 @@ function detectLargestFaceRect(cv, grayMat, classifier) {
 
     faces.delete();
     return largest;
+}
+
+function rectIoU(a, b) {
+    const x1 = Math.max(a.x, b.x);
+    const y1 = Math.max(a.y, b.y);
+    const x2 = Math.min(a.x + a.width, b.x + b.width);
+    const y2 = Math.min(a.y + a.height, b.y + b.height);
+    const w = Math.max(0, x2 - x1);
+    const h = Math.max(0, y2 - y1);
+    const inter = w * h;
+    const union = (a.width * a.height) + (b.width * b.height) - inter;
+    if (!union) return 0;
+    return inter / union;
+}
+
+function mergeBodyRects(rects) {
+    const merged = [];
+    for (const rect of rects) {
+        const duplicate = merged.some((existing) => rectIoU(existing, rect) >= 0.28);
+        if (!duplicate) merged.push(rect);
+    }
+    return merged;
 }
 
 async function extractFaceVectorWithOpenCvJs(frameBuffer) {
@@ -1764,23 +1836,41 @@ async function detectPeopleCountWithOpenCvJs(frameBuffer) {
     const cv = await loadOpenCvJs();
     const mat = await decodeJpegToMat(frameBuffer);
     const gray = new cv.Mat();
-    const classifier = new cv.CascadeClassifier();
     try {
         cv.cvtColor(mat, gray, cv.COLOR_RGBA2GRAY, 0);
         cv.equalizeHist(gray, gray);
-        if (!classifier.load(opencvJsCascadePath)) {
-            throw new Error('Failed to load Haar cascade in OpenCV.js.');
+        if (!opencvJsBodyCascadeFsPaths.length) {
+            throw new Error('Body cascades are not loaded.');
         }
 
-        const faces = new cv.RectVector();
-        const minSize = new cv.Size(40, 40);
-        const maxSize = new cv.Size(0, 0);
-        classifier.detectMultiScale(gray, faces, 1.1, 4, 0, minSize, maxSize);
-        const count = faces.size();
-        faces.delete();
-        return Math.max(0, Number(count || 0));
+        const allRects = [];
+        for (const cascadePath of opencvJsBodyCascadeFsPaths) {
+            const classifier = new cv.CascadeClassifier();
+            try {
+                if (!classifier.load(cascadePath)) continue;
+                const detected = new cv.RectVector();
+                const minSize = new cv.Size(28, 28);
+                const maxSize = new cv.Size(0, 0);
+                classifier.detectMultiScale(gray, detected, 1.08, 2, 0, minSize, maxSize);
+                for (let i = 0; i < detected.size(); i += 1) {
+                    const rect = detected.get(i);
+                    allRects.push({
+                        x: rect.x,
+                        y: rect.y,
+                        width: rect.width,
+                        height: rect.height
+                    });
+                }
+                detected.delete();
+            } finally {
+                classifier.delete();
+            }
+        }
+
+        if (!allRects.length) return 0;
+        const merged = mergeBodyRects(allRects);
+        return Math.max(0, merged.length);
     } finally {
-        classifier.delete();
         gray.delete();
         mat.delete();
     }
@@ -2025,6 +2115,9 @@ app.get('/api/opencv-js/health', requireWhitelistedIp, requireAuth, async (req, 
         cascadePathConfigured: OPENCV_JS_HAAR_CASCADE || null,
         cascadePathResolved: opencvJsCascadeHostPath || null,
         cascadeExists: Boolean(opencvJsCascadeHostPath && fs.existsSync(opencvJsCascadeHostPath)),
+        bodyCascadeSources: OPENCV_BODY_CASCADE_SOURCES,
+        bodyCascadeResolved: opencvJsBodyCascadeHostPaths,
+        bodyCascadeCount: opencvJsBodyCascadeFsPaths.length,
         cascadeDownloadUrl: OPENCV_CASCADE_DOWNLOAD_URL,
         lastInitAttemptAt: opencvJsLastInitAttemptAt ? new Date(opencvJsLastInitAttemptAt).toISOString() : null,
         lastInitError: opencvJsLastInitError || null
