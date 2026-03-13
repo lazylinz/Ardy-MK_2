@@ -1,13 +1,12 @@
 const express = require('express');
 const path = require('path');
 const fs = require('fs');
-const os = require('os');
 require('dotenv').config();
 const cors = require('cors');
 const session = require('express-session');
 const https = require('https');
 const crypto = require('crypto');
-const { execFile } = require('child_process');
+const jpeg = require('jpeg-js');
 const { Readable } = require('stream');
 const selfsigned = require('selfsigned');
 const { createArduinoService, registerArduinoRestRoutes } = require('./arduino-rest-handler');
@@ -86,14 +85,8 @@ const CAM_FRAME_TTL_MS = Math.max(1000, Number(process.env.CAM_FRAME_TTL_MS || 1
 const CAM_MAX_FRAME_BYTES = Math.max(64 * 1024, Number(process.env.CAM_MAX_FRAME_BYTES || 512 * 1024));
 const CAM_DETECT_ENABLED = String(process.env.CAM_DETECT_ENABLED || 'true').trim().toLowerCase() !== 'false';
 const CAM_DETECT_INTERVAL_MS = Math.max(800, Number(process.env.CAM_DETECT_INTERVAL_MS || 2500));
-const CAM_DETECT_BACKEND = String(process.env.CAM_DETECT_BACKEND || 'opencv-java').trim().toLowerCase();
-const OPENCV_JAVA_JAR = String(process.env.OPENCV_JAVA_JAR || '').trim();
-const OPENCV_HAAR_CASCADE = String(process.env.OPENCV_HAAR_CASCADE || '').trim();
-const OPENCV_JAVA_TIMEOUT_MS = Math.max(1500, Number(process.env.OPENCV_JAVA_TIMEOUT_MS || 12000));
-const OPENCV_JAVA_BUILD_DIR = path.join(__dirname, '.opencv-java-build');
-const OPENCV_JAVA_SOURCE_FILE = path.join(__dirname, 'opencv-java', 'PeopleCounter.java');
-const OPENCV_JAVA_CLASS_NAME = 'PeopleCounter';
-const OPENCV_FACE_AUTH_CLASS_NAME = 'FaceAuthProcessor';
+const CAM_DETECT_BACKEND = String(process.env.CAM_DETECT_BACKEND || 'opencv-js').trim().toLowerCase();
+const OPENCV_JS_HAAR_CASCADE = String(process.env.OPENCV_JS_HAAR_CASCADE || process.env.OPENCV_HAAR_CASCADE || '').trim();
 const FACE_OPENCV_MAX_IMAGES = Math.max(1, Number(process.env.FACE_OPENCV_MAX_IMAGES || 6));
 const FACE_OPENCV_MATCH_THRESHOLD = Number(process.env.FACE_OPENCV_MATCH_THRESHOLD || 0.62);
 const FACE_OPENCV_MARGIN = Number(process.env.FACE_OPENCV_MARGIN || 0.045);
@@ -104,8 +97,11 @@ let latestCamFrame = null;
 let arduinoService = null;
 let lastCamDetectionAtMs = 0;
 let lastPublishedDetectedPeople = null;
-let opencvJavaReady = false;
-let opencvJavaReadyChecked = false;
+let opencvJsReady = false;
+let opencvJsReadyChecked = false;
+let opencvJsCascadePath = '/haarcascade_frontalface_default.xml';
+let cvInstance = null;
+let cvLoadPromise = null;
 const MACRO_FIRING_WINDOW_MS = 5000;
 const MACRO_TICK_INTERVAL_MS = 1000;
 const GLOBAL_MACRO_RUNTIME_SESSION_ID = 'global-macro-runtime';
@@ -1063,7 +1059,7 @@ async function getOpenCvProbeFromRequestImages(body) {
             imageBuffer = null;
         }
         if (!imageBuffer || imageBuffer.length < 128) continue;
-        const vector = await extractFaceVectorWithOpenCvJava(imageBuffer);
+        const vector = await extractFaceVectorWithOpenCvJs(imageBuffer);
         const sanitized = sanitizeOpenCvVector(vector);
         if (sanitized) vectors.push(sanitized);
     }
@@ -1582,153 +1578,170 @@ function broadcastCamFrame(frame) {
     }
 }
 
-function execFileAsync(file, args, options = {}) {
-    return new Promise((resolve, reject) => {
-        execFile(file, args, options, (error, stdout, stderr) => {
-            if (error) {
-                const enriched = new Error(stderr || error.message || 'execFile failed');
-                enriched.originalError = error;
-                reject(enriched);
-                return;
+async function loadOpenCvJs() {
+    if (cvInstance) return cvInstance;
+    if (!cvLoadPromise) {
+        cvLoadPromise = (async () => {
+            const opencvModule = await import('@techstark/opencv-js');
+            let cv = opencvModule?.default || opencvModule;
+            if (cv && typeof cv.then === 'function') {
+                cv = await cv;
             }
-            resolve({ stdout: String(stdout || ''), stderr: String(stderr || '') });
-        });
-    });
+            if (!cv || typeof cv.Mat !== 'function') {
+                throw new Error('Failed to initialize OpenCV.js runtime.');
+            }
+            return cv;
+        })();
+    }
+    cvInstance = await cvLoadPromise;
+    return cvInstance;
 }
 
-async function ensureOpenCvJavaReady() {
-    if (opencvJavaReadyChecked) return opencvJavaReady;
-    opencvJavaReadyChecked = true;
+async function ensureOpenCvJsReady() {
+    if (opencvJsReadyChecked) return opencvJsReady;
+    opencvJsReadyChecked = true;
 
-    if (!OPENCV_JAVA_JAR || !OPENCV_HAAR_CASCADE) {
-        console.warn('[CAM DETECT] OpenCV Java disabled: OPENCV_JAVA_JAR or OPENCV_HAAR_CASCADE is missing.');
-        opencvJavaReady = false;
-        return false;
-    }
-    if (!fs.existsSync(OPENCV_JAVA_JAR)) {
-        console.warn(`[CAM DETECT] OpenCV Java disabled: jar not found at ${OPENCV_JAVA_JAR}`);
-        opencvJavaReady = false;
-        return false;
-    }
-    if (!fs.existsSync(OPENCV_HAAR_CASCADE)) {
-        console.warn(`[CAM DETECT] OpenCV Java disabled: haar cascade not found at ${OPENCV_HAAR_CASCADE}`);
-        opencvJavaReady = false;
-        return false;
-    }
-    if (!fs.existsSync(OPENCV_JAVA_SOURCE_FILE)) {
-        console.warn(`[CAM DETECT] OpenCV Java disabled: source not found at ${OPENCV_JAVA_SOURCE_FILE}`);
-        opencvJavaReady = false;
+    if (!OPENCV_JS_HAAR_CASCADE || !fs.existsSync(OPENCV_JS_HAAR_CASCADE)) {
+        console.warn(`[CAM DETECT] OpenCV.js disabled: cascade not found at ${OPENCV_JS_HAAR_CASCADE || '(unset)'}`);
+        opencvJsReady = false;
         return false;
     }
 
-    const javaSourceDir = path.join(__dirname, 'opencv-java');
-    const javaSources = fs.existsSync(javaSourceDir)
-        ? fs.readdirSync(javaSourceDir)
-            .filter((name) => String(name).toLowerCase().endsWith('.java'))
-            .map((name) => path.join(javaSourceDir, name))
-        : [];
-    if (!javaSources.length) {
-        console.warn('[CAM DETECT] OpenCV Java disabled: no .java sources found in api/opencv-java');
-        opencvJavaReady = false;
-        return false;
-    }
-
-    fs.mkdirSync(OPENCV_JAVA_BUILD_DIR, { recursive: true });
     try {
-        await execFileAsync('javac', ['-cp', OPENCV_JAVA_JAR, '-d', OPENCV_JAVA_BUILD_DIR, ...javaSources], {
-            timeout: OPENCV_JAVA_TIMEOUT_MS
-        });
-        opencvJavaReady = true;
-        console.log('[CAM DETECT] OpenCV Java detector compiled successfully.');
+        const cv = await loadOpenCvJs();
+        const cascadeData = fs.readFileSync(OPENCV_JS_HAAR_CASCADE);
+        if (!cv.FS.analyzePath('/').exists) {
+            cv.FS.mkdir('/');
+        }
+        if (cv.FS.analyzePath(opencvJsCascadePath).exists) {
+            cv.FS.unlink(opencvJsCascadePath);
+        }
+        cv.FS_createDataFile('/', path.basename(opencvJsCascadePath), cascadeData, true, false, false);
+        opencvJsReady = true;
+        console.log('[CAM DETECT] OpenCV.js ready.');
     } catch (error) {
-        console.error(`[CAM DETECT] javac failed: ${error.message}`);
-        opencvJavaReady = false;
+        console.error(`[CAM DETECT] OpenCV.js init failed: ${error.message}`);
+        opencvJsReady = false;
     }
-    return opencvJavaReady;
+    return opencvJsReady;
 }
 
-function parseFaceAuthJson(rawStdout) {
-    const raw = String(rawStdout || '').trim();
-    if (!raw) throw new Error('FaceAuthProcessor returned empty output.');
-    let parsed = null;
-    try {
-        parsed = JSON.parse(raw);
-    } catch (error) {
-        throw new Error(`FaceAuthProcessor invalid JSON: ${raw.slice(0, 160)}`);
+async function decodeJpegToMat(frameBuffer) {
+    const cv = await loadOpenCvJs();
+    const decoded = jpeg.decode(frameBuffer, { useTArray: true });
+    if (!decoded || !decoded.width || !decoded.height || !decoded.data) {
+        throw new Error('Failed to decode JPEG buffer.');
     }
-    if (!parsed?.ok) {
-        throw new Error(String(parsed?.error || 'FaceAuthProcessor failed'));
-    }
-    if (!Array.isArray(parsed?.vector) || !parsed.vector.length) {
-        throw new Error('FaceAuthProcessor vector is missing.');
-    }
-    return parsed.vector.map((v) => Number(v)).filter((v) => Number.isFinite(v));
+    const imageData = {
+        data: new Uint8ClampedArray(decoded.data),
+        width: decoded.width,
+        height: decoded.height
+    };
+    return cv.matFromImageData(imageData);
 }
 
-async function extractFaceVectorWithOpenCvJava(frameBuffer) {
-    const ready = await ensureOpenCvJavaReady();
-    if (!ready) {
-        throw new Error('OpenCV Java detector is not ready.');
+function detectLargestFaceRect(cv, grayMat, classifier) {
+    const faces = new cv.RectVector();
+    const minSize = new cv.Size(40, 40);
+    const maxSize = new cv.Size(0, 0);
+    classifier.detectMultiScale(grayMat, faces, 1.1, 4, 0, minSize, maxSize);
+
+    let largest = null;
+    let largestArea = 0;
+    for (let i = 0; i < faces.size(); i += 1) {
+        const rect = faces.get(i);
+        const area = rect.width * rect.height;
+        if (area > largestArea) {
+            largestArea = area;
+            largest = rect;
+        }
     }
 
-    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'face-auth-'));
-    const imagePath = path.join(tempDir, 'face.jpg');
+    faces.delete();
+    minSize.delete();
+    maxSize.delete();
+    return largest;
+}
+
+async function extractFaceVectorWithOpenCvJs(frameBuffer) {
+    const ready = await ensureOpenCvJsReady();
+    if (!ready) throw new Error('OpenCV.js is not ready.');
+
+    const cv = await loadOpenCvJs();
+    const mat = await decodeJpegToMat(frameBuffer);
+    const gray = new cv.Mat();
+    const classifier = new cv.CascadeClassifier();
     try {
-        fs.writeFileSync(imagePath, frameBuffer);
-        const classpath = `${OPENCV_JAVA_BUILD_DIR}${path.delimiter}${OPENCV_JAVA_JAR}`;
-        const { stdout } = await execFileAsync(
-            'java',
-            ['-cp', classpath, OPENCV_FACE_AUTH_CLASS_NAME, imagePath, OPENCV_HAAR_CASCADE],
-            { timeout: OPENCV_JAVA_TIMEOUT_MS }
-        );
-        return parseFaceAuthJson(stdout);
+        cv.cvtColor(mat, gray, cv.COLOR_RGBA2GRAY, 0);
+        cv.equalizeHist(gray, gray);
+        if (!classifier.load(opencvJsCascadePath)) {
+            throw new Error('Failed to load Haar cascade in OpenCV.js.');
+        }
+
+        const largest = detectLargestFaceRect(cv, gray, classifier);
+        if (!largest) {
+            throw new Error('No face detected.');
+        }
+
+        const faceRoi = gray.roi(largest);
+        const resized = new cv.Mat();
+        cv.resize(faceRoi, resized, new cv.Size(16, 16), 0, 0, cv.INTER_AREA);
+        const pixels = Array.from(resized.data || []);
+        faceRoi.delete();
+        resized.delete();
+        if (!pixels.length) {
+            throw new Error('Face vector extraction failed.');
+        }
+
+        const mean = pixels.reduce((acc, v) => acc + Number(v || 0), 0) / pixels.length;
+        const variance = pixels.reduce((acc, v) => {
+            const d = Number(v || 0) - mean;
+            return acc + d * d;
+        }, 0) / pixels.length;
+        const std = Math.sqrt(Math.max(variance, 1e-12));
+
+        return pixels.map((v) => (Number(v || 0) - mean) / std);
     } finally {
-        try {
-            fs.rmSync(tempDir, { recursive: true, force: true });
-        } catch (error) {
-            // no-op
-        }
+        classifier.delete();
+        gray.delete();
+        mat.delete();
     }
 }
 
-async function detectPeopleCountWithOpenCvJava(frameBuffer) {
-    const ready = await ensureOpenCvJavaReady();
-    if (!ready) {
-        throw new Error('OpenCV Java detector is not ready.');
-    }
+async function detectPeopleCountWithOpenCvJs(frameBuffer) {
+    const ready = await ensureOpenCvJsReady();
+    if (!ready) throw new Error('OpenCV.js is not ready.');
 
-    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cam-frame-'));
-    const imagePath = path.join(tempDir, 'frame.jpg');
+    const cv = await loadOpenCvJs();
+    const mat = await decodeJpegToMat(frameBuffer);
+    const gray = new cv.Mat();
+    const classifier = new cv.CascadeClassifier();
     try {
-        fs.writeFileSync(imagePath, frameBuffer);
-        const classpath = `${OPENCV_JAVA_BUILD_DIR}${path.delimiter}${OPENCV_JAVA_JAR}`;
-        const { stdout } = await execFileAsync(
-            'java',
-            ['-cp', classpath, OPENCV_JAVA_CLASS_NAME, imagePath, OPENCV_HAAR_CASCADE],
-            { timeout: OPENCV_JAVA_TIMEOUT_MS }
-        );
-        const raw = String(stdout || '').trim();
-        const match = raw.match(/\b(\d{1,3})\b/);
-        if (!match) {
-            throw new Error(`Invalid detector output: ${raw || 'empty'}`);
+        cv.cvtColor(mat, gray, cv.COLOR_RGBA2GRAY, 0);
+        cv.equalizeHist(gray, gray);
+        if (!classifier.load(opencvJsCascadePath)) {
+            throw new Error('Failed to load Haar cascade in OpenCV.js.');
         }
-        const count = Number(match[1]);
-        if (!Number.isFinite(count) || count < 0) {
-            throw new Error(`Invalid detector count: ${raw}`);
-        }
-        return count;
+
+        const faces = new cv.RectVector();
+        const minSize = new cv.Size(40, 40);
+        const maxSize = new cv.Size(0, 0);
+        classifier.detectMultiScale(gray, faces, 1.1, 4, 0, minSize, maxSize);
+        const count = faces.size();
+        faces.delete();
+        minSize.delete();
+        maxSize.delete();
+        return Math.max(0, Number(count || 0));
     } finally {
-        try {
-            fs.rmSync(tempDir, { recursive: true, force: true });
-        } catch (error) {
-            // no-op
-        }
+        classifier.delete();
+        gray.delete();
+        mat.delete();
     }
 }
 
 async function detectPeopleCountFromFrame(frameBuffer) {
-    if (CAM_DETECT_BACKEND === 'opencv-java') {
-        return detectPeopleCountWithOpenCvJava(frameBuffer);
+    if (CAM_DETECT_BACKEND === 'opencv-js') {
+        return detectPeopleCountWithOpenCvJs(frameBuffer);
     }
     throw new Error(`Unsupported CAM_DETECT_BACKEND: ${CAM_DETECT_BACKEND}`);
 }
@@ -1750,8 +1763,8 @@ async function detectAndPublishPeopleCount(frameBuffer) {
             sessionId: GLOBAL_MACRO_RUNTIME_SESSION_ID,
             name: 'detectedPeople',
             value: detectedPeople,
-            sourceMacroId: 'cam-opencv-java',
-            sourceMacroName: 'cam-opencv-java'
+            sourceMacroId: 'cam-opencv-js',
+            sourceMacroName: 'cam-opencv-js'
         });
         lastPublishedDetectedPeople = detectedPeople;
     }

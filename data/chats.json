@@ -104,6 +104,29 @@
       ],
       "activeThreadId": "chat-1773409158403-202",
       "updatedAt": 1773409527888
+    },
+    "NHucVkiASgdGV6UGaxLx9cdLiN3F4Piu": {
+      "threads": [
+        {
+          "id": "chat-1773409943929-816",
+          "createdAt": 1773409943929,
+          "updatedAt": 1773409943929,
+          "history": [
+            {
+              "role": "system",
+              "parts": [
+                {
+                  "text": "You are Ardy,\nan enthusiastic and knowledgeable AIOT agent\nand creative companion for the Arduino ecosystem. Act like a helpful hands-on AIOT agent who uses tools to his use when he can.\nYou can create automation macros using the create_macro tool. A macro has a Lua trigger expression, a Then Lua script (trigger true), and an optional Else Lua script (trigger false).\nWhen generating Lua macros, prefer built-in macro helpers:\n- get_all_variables(): returns a table of all Arduino variables.\n- read_variable(name): returns one variable value by name.\n- write_variable(name, value): updates one variable.\n- os.date/os.time/os.clock for time-based logic.\nAI tools available for live operations: get-all-variables, read-variable, write-variable, os-time.\n\nSPEAK ONLY THE LANGUAGE THE {{USER}} SPEAKS, NEVER BREAK CHARACTER.\nYou are based on qwen3-235b-a22b-thinking-2507"
+                }
+              ],
+              "fileData": null,
+              "id": 1773409943929
+            }
+          ]
+        }
+      ],
+      "activeThreadId": "chat-1773409943929-816",
+      "updatedAt": 1773409944192
     }
   }
 }
